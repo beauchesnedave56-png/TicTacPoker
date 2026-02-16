@@ -1,0 +1,16 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Launch Web",
+      "type": "shell",
+      "command": "$env:Path += \";C:\\Program Files\\nodejs\" ; Get-Process | Where-Object {$_.ProcessName -like \"*node*\"} | Stop-Process -Force -ErrorAction SilentlyContinue ; cd c:\\Users\\MindF\\Documents\\TicTacPoker ; &\"C:\\Program Files\\nodejs\\npm.cmd\" install ; &\"C:\\Program Files\\nodejs\\npm.cmd\" run dev",
+      "isBackground": false,
+      "problemMatcher": [],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    }
+  ]
+}
