@@ -497,40 +497,45 @@ export default function TicATacPoker() {
     return () => m.removeEventListener("change", onChange);
   }, []);
 
-  // Mobile 1v1 needs a brief delay when the opponent acts so the move is visible
-  // before the board flips. Steal rounds are special: the acting player should see
-  // the victim board immediately while they choose the target.
+  // Mobile / 2v2 (et tout mode où on ne peut pas voir toutes les grilles à la
+  // fois) doivent attendre un peu avant de changer de vue, pour que le joueur
+  // voie réellement la carte se poser (ou le vol se terminer) avant que
+  // l'écran ne change — quel que soit le nombre de joueurs, en local ou en
+  // ligne. Seule exception : entrer en phase de vol doit être instantané,
+  // puisqu'il faut voir la grille cible tout de suite pour choisir une carte.
   useEffect(() => {
     if (gameOver) return;
+    const SWITCH_DELAY_MS = 1200;
 
     if (netMode === 'local') {
-      setViewedPlayer(phase === 'steal' ? (turn + 1) % grids.length : turn);
-      return;
-    }
-
-    if (gameMode === '1v1' && isMobile) {
-      if (phase === 'steal' && turn === myPlayerIdx) {
+      if (phase === 'steal') {
         setViewedPlayer((turn + 1) % grids.length);
         return;
       }
+      const timer = setTimeout(() => setViewedPlayer(turn), SWITCH_DELAY_MS);
+      return () => clearTimeout(timer);
+    }
 
-      if (turn !== myPlayerIdx) {
-        const timer = setTimeout(() => setViewedPlayer(turn), 1200);
-        return () => clearTimeout(timer);
-      }
+    // Online — en 1v1 mobile on suit le joueur actif ; sinon on revient
+    // toujours à sa propre grille.
+    const watchingActivePlayer = gameMode === '1v1' && isMobile;
+    const needsSwitch = isMobile || gameMode === '2v2';
+    if (!needsSwitch) return;
 
+    if (phase === 'steal' && turn === myPlayerIdx) {
+      setViewedPlayer((turn + 1) % grids.length);
+      return;
+    }
+
+    if (watchingActivePlayer && turn === myPlayerIdx) {
+      // C'est mon tour : je dois reprendre la main tout de suite, pas d'attente.
       setViewedPlayer(myPlayerIdx);
       return;
     }
 
-    const needsSwitch = isMobile || gameMode === '2v2';
-    if (!needsSwitch) return;
-
-    if (turn === myPlayerIdx && phase === 'steal') {
-      setViewedPlayer((turn + 1) % grids.length);
-    } else {
-      setViewedPlayer(myPlayerIdx);
-    }
+    const target = watchingActivePlayer ? turn : myPlayerIdx;
+    const timer = setTimeout(() => setViewedPlayer(target), SWITCH_DELAY_MS);
+    return () => clearTimeout(timer);
   }, [turn, phase, netMode, gameOver, isMobile, gameMode, myPlayerIdx, grids.length]);
 
   // ── Envoyer l'état complet à l'adversaire (hôte uniquement, source de vérité) ──
