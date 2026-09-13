@@ -33,7 +33,7 @@ jobs:
       - name: Build app for GitHub Pages
         env:
           VITE_WEB_APP_URL: https://beauchesnedave56-png.github.io/TicTacPoker/
-          VITE_APK_DOWNLOAD_URL: https://github.com/beauchesnedave56-png/TicTacPoker/releases/download/v1.0.3/TicTacPoker.apk
+          VITE_APK_DOWNLOAD_URL: https://github.com/beauchesnedave56-png/TicTacPoker/releases/latest/download/TicTacPoker.apk
         run: npm run build
 
       - name: Upload artifact

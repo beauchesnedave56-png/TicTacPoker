@@ -11,10 +11,27 @@ const P_CLR  = ['#4B9EFF','#FF5F5F','#A855F7','#FFAD60']; // P1 (Blue), P2 (Red)
 const TEAM_CLR = ['#4B9EFF', '#FF5F5F'];
 const ROOM_PREFIX = 'tatp-'; // namespace so we don't collide with other apps on the public PeerJS broker
 const APP_WEB_URL = (import.meta.env.VITE_WEB_APP_URL || 'https://beauchesnedave56-png.github.io/TicTacPoker/').replace(/\/+$/, '') + '/';
-const APP_DOWNLOAD_URL = import.meta.env.VITE_APK_DOWNLOAD_URL || 'https://github.com/beauchesnedave56-png/TicTacPoker/releases/download/v1.0.3/TicTacPoker.apk';
+const DEFAULT_APK_DOWNLOAD_URL = 'https://github.com/beauchesnedave56-png/TicTacPoker/releases/latest/download/TicTacPoker.apk';
+const APP_DOWNLOAD_URL = import.meta.env.VITE_APK_DOWNLOAD_URL || DEFAULT_APK_DOWNLOAD_URL;
 
 function buildInviteUrl(roomCode) {
   return new URL(`?join=${encodeURIComponent(roomCode)}`, APP_WEB_URL).toString();
+}
+
+async function getLatestReleaseApkUrl() {
+  try {
+    const res = await fetch('https://api.github.com/repos/beauchesnedave56-png/TicTacPoker/releases/latest', {
+      headers: { Accept: 'application/vnd.github+json' },
+    });
+    if (!res.ok) throw new Error(`GitHub API error: ${res.status}`);
+    const data = await res.json();
+    const apkAsset = Array.isArray(data.assets)
+      ? data.assets.find(asset => /\.apk$/i.test(asset.name) || /apk/i.test(asset.name))
+      : null;
+    return apkAsset?.browser_download_url || APP_DOWNLOAD_URL;
+  } catch {
+    return APP_DOWNLOAD_URL;
+  }
 }
 
 // Court code, lisible à l'oral/à l'écrit — évite les caractères ambigus (0/O, 1/I/L)
@@ -428,6 +445,8 @@ export default function TicATacPoker() {
   const connsRef = useRef([]); // Multiple connections for the host
   const [players,   setPlayers]   = useState([]); // { id, name, idx }
   const [qrCodeUrl, setQrCodeUrl] = useState('');
+  const [apkDownloadUrl, setApkDownloadUrl] = useState(APP_DOWNLOAD_URL);
+  const [updateStatus, setUpdateStatus] = useState('');
   const liveRef = useRef({}); // toujours à jour après chaque rendu ; lu par les callbacks PeerJS pour éviter les closures périmées
   const [myPlayerIdx, setMyPlayerIdx] = useState(0); // assigned by host
 
@@ -551,6 +570,7 @@ export default function TicATacPoker() {
         setConnStatus('connected');
         setNetScreen('lobby');
         connsRef.current = [c];
+        c.send({ type: 'player-profile', payload: { name: sanitizeProfileName(profile.displayName, 'Player 1'), id: profile.id } });
       }
     });
     c.on('data', data => {
@@ -559,6 +579,21 @@ export default function TicATacPoker() {
         setMyPlayerIdx(data.payload.myPlayerIdx);
         setGameMode(data.payload.gameMode);
         setPlayers(data.payload.players);
+      }
+      if (data.type === 'player-profile' && live.netMode === 'host') {
+        const guestName = sanitizeProfileName(data.payload.name, `Player ${live.players.length + 1}`);
+        setPlayers(prev => {
+          const next = prev.map(player => (player.id === data.payload.id || player.id === c.peer)
+            ? { ...player, name: guestName }
+            : player);
+          if (next.every(player => player.id !== data.payload.id && player.id !== c.peer)) {
+            next.push({ id: data.payload.id || c.peer, idx: prev.length, name: guestName });
+          }
+          connsRef.current.forEach(otherC => {
+            if (otherC !== c && otherC.open) otherC.send({ type: 'state', payload: { players: next } });
+          });
+          return next;
+        });
       }
       if (data.type === 'error' && live.netMode === 'guest') {
         setConnStatus('error');
@@ -587,7 +622,7 @@ export default function TicATacPoker() {
     setNetMode('host');
     setNetScreen('hosting');
     setConnStatus('connecting');
-    setPlayers([{ id: 'host', idx: 0, name: sanitizeProfileName(profile.displayName, 'Player 1') }]);
+    setPlayers([{ id: profile.id, idx: 0, name: sanitizeProfileName(profile.displayName, 'Player 1') }]);
     setMyPlayerIdx(0);
     const code = fixedCode || makeRoomCode();
     const p = new Peer(ROOM_PREFIX + code);
@@ -617,7 +652,6 @@ export default function TicATacPoker() {
     });
     p.on('error', err => {
       if (err.type === 'peer-unavailable') {
-        // Personne ne hoste 'QUICK', on devient l'hôte
         p.destroy();
         startHosting(quickCode);
       } else {
@@ -652,7 +686,26 @@ export default function TicATacPoker() {
     });
   };
 
-  const qrShareUrl = roomCode ? buildInviteUrl(roomCode) : APP_DOWNLOAD_URL;
+  useEffect(() => {
+    let cancelled = false;
+    const loadApkUrl = async () => {
+      const envOverride = import.meta.env.VITE_APK_DOWNLOAD_URL;
+      if (envOverride) {
+        if (!cancelled) setApkDownloadUrl(envOverride);
+        return;
+      }
+      try {
+        const latestUrl = await getLatestReleaseApkUrl();
+        if (!cancelled) setApkDownloadUrl(latestUrl);
+      } catch {
+        if (!cancelled) setApkDownloadUrl(DEFAULT_APK_DOWNLOAD_URL);
+      }
+    };
+    loadApkUrl();
+    return () => { cancelled = true; };
+  }, []);
+
+  const qrShareUrl = roomCode ? buildInviteUrl(roomCode) : apkDownloadUrl;
 
   useEffect(() => {
     const joinCodeFromUrl = new URLSearchParams(window.location.search).get('join');
@@ -663,7 +716,7 @@ export default function TicATacPoker() {
   }, []);
 
   useEffect(() => {
-    const target = qrShareUrl || APP_DOWNLOAD_URL;
+    const target = qrShareUrl || apkDownloadUrl || APP_DOWNLOAD_URL;
     if (!target) {
       setQrCodeUrl('');
       return;
@@ -677,6 +730,22 @@ export default function TicATacPoker() {
       .then(dataUrl => setQrCodeUrl(dataUrl))
       .catch(() => setQrCodeUrl(''));
   }, [qrShareUrl]);
+
+  const handleUpdateRelease = async () => {
+    setUpdateStatus('Checking for latest release...');
+    try {
+      const releaseUrl = await getLatestReleaseApkUrl();
+      if (typeof window !== 'undefined') {
+        const newTab = window.open(releaseUrl, '_blank', 'noopener,noreferrer');
+        if (!newTab) {
+          window.location.href = releaseUrl;
+        }
+      }
+      setUpdateStatus('Latest release opened.');
+    } catch {
+      setUpdateStatus('Could not fetch the latest release right now.');
+    }
+  };
 
   const leaveGame = () => {
     connsRef.current.forEach(c => c.close());
@@ -745,6 +814,23 @@ export default function TicATacPoker() {
     const nextProfile = { ...profile, displayName: nextName, updatedAt: new Date().toISOString() };
     setProfile(nextProfile);
     writeJsonStorage(PROFILE_STORAGE_KEY, nextProfile);
+
+    if (netMode === 'guest' && connsRef.current[0]?.open) {
+      connsRef.current[0].send({ type: 'player-profile', payload: { name: nextName || 'Player 1', id: nextProfile.id } });
+    }
+    if (netMode === 'host') {
+      setPlayers(prev => {
+        const updated = prev.map(player => (
+          player.id === nextProfile.id || player.idx === 0
+            ? { ...player, name: nextName || 'Player 1' }
+            : player
+        ));
+        connsRef.current.forEach(c => {
+          if (c.open) c.send({ type: 'state', payload: { players: updated } });
+        });
+        return updated;
+      });
+    }
   };
 
   useEffect(() => {
@@ -1087,6 +1173,18 @@ export default function TicATacPoker() {
               }}>
                 {roomCode ? 'Show join QR code' : 'Install / Join via QR'}
               </button>
+              <button onClick={handleUpdateRelease} style={{
+                padding:'10px 12px', borderRadius:10, border:'1px solid rgba(75,158,255,.5)',
+                background:'rgba(75,158,255,.08)', color:'#4B9EFF', fontSize:11, fontWeight:'bold',
+                cursor:'pointer', fontFamily:'Georgia,serif',
+              }}>
+                Update latest release
+              </button>
+              {updateStatus ? (
+                <div style={{ color:'#6EAB80', fontSize:10, letterSpacing:1, textTransform:'uppercase' }}>
+                  {updateStatus}
+                </div>
+              ) : null}
               <button onClick={() => setNetScreen('history')} style={{
                 padding:'10px 12px', borderRadius:10, border:'1px solid rgba(255,255,255,.12)',
                 background:'rgba(255,255,255,.03)', color:'#FFD700', fontSize:11, fontWeight:'bold',
