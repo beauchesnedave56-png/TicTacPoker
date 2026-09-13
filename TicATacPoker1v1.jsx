@@ -11,7 +11,7 @@ const P_CLR  = ['#4B9EFF','#FF5F5F','#A855F7','#FFAD60']; // P1 (Blue), P2 (Red)
 const TEAM_CLR = ['#4B9EFF', '#FF5F5F'];
 const ROOM_PREFIX = 'tatp-'; // namespace so we don't collide with other apps on the public PeerJS broker
 const APP_WEB_URL = (import.meta.env.VITE_WEB_APP_URL || 'https://beauchesnedave56-png.github.io/TicTacPoker/').replace(/\/+$/, '') + '/';
-const APP_DOWNLOAD_URL = import.meta.env.VITE_APK_DOWNLOAD_URL || 'https://github.com/beauchesnedave56-png/TicTacPoker/releases/latest/download/TicTacPoker.apk';
+const APP_DOWNLOAD_URL = import.meta.env.VITE_APK_DOWNLOAD_URL || 'https://github.com/beauchesnedave56-png/TicTacPoker/releases/download/v1.0.3/TicTacPoker.apk';
 
 function buildInviteUrl(roomCode) {
   return new URL(`?join=${encodeURIComponent(roomCode)}`, APP_WEB_URL).toString();
