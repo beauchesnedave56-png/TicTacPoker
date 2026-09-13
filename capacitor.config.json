@@ -1,0 +1,8 @@
+{
+  "appId": "com.example.ticatacpoker",
+  "appName": "Tic-A-Tac Poker",
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "https"
+  }
+}

@@ -1,21 +1,33 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
+import Peer from "peerjs";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const SUITS  = ['♠','♥','♦','♣'];
 const VALUES = ['2','3','4','5','6','7','8','9','10','J','Q','K','A'];
 const VNUM   = {'2':2,'3':3,'4':4,'5':5,'6':6,'7':7,'8':8,'9':9,'10':10,'J':11,'Q':12,'K':13,'A':14};
 const RED    = new Set(['♥','♦']);
-const P_CLR  = ['#4B9EFF','#FF5F5F'];
+const P_CLR  = ['#4B9EFF','#FF5F5F','#A855F7','#FFAD60']; // P1 (Blue), P2 (Red), P3 (Purple), P4 (Orange)
+const TEAM_CLR = ['#4B9EFF', '#FF5F5F'];
+const ROOM_PREFIX = 'tatp-'; // namespace so we don't collide with other apps on the public PeerJS broker
+
+// Court code, lisible à l'oral/à l'écrit — évite les caractères ambigus (0/O, 1/I/L)
+function makeRoomCode() {
+  const chars = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+  let code = '';
+  for (let i = 0; i < 5; i++) code += chars[Math.floor(Math.random()*chars.length)];
+  return code;
+}
 
 function buildDeck() {
   const deck = [];
   for (const s of SUITS)
     for (const v of VALUES)
-      deck.push({ suit:s, value:v, id:`${v}${s}`, wild:false, steal:false, remove:false });
-  deck.push({ suit:'★', value:'JK', id:'JK1', wild:true,  label:'WILD', steal:false,  remove:false  });
-  deck.push({ suit:'★', value:'JK', id:'JK2', wild:true,  label:'WILD', steal:false,  remove:false  });
-  deck.push({ suit:'⚡', value:'ST', id:'ST1', steal:true, label:'STEAL', wild:false, remove:false });
-  deck.push({ suit:'🗑', value:'RM', id:'RM1', remove:true, label:'REMOVE', wild:false, steal:false });
+      deck.push({ suit:s, value:v, id:`${v}${s}`, wild:false, steal:false });
+  deck.push({ suit:'★', value:'JK', id:'JK1', wild:true,  label:'WILD',  steal:false });
+  deck.push({ suit:'★', value:'JK', id:'JK2', wild:true,  label:'WILD',  steal:false });
+  deck.push({ suit:'★', value:'JK', id:'JK3', wild:true,  label:'WILD',  steal:false });
+  deck.push({ suit:'⚡', value:'ST', id:'ST1', steal:true, label:'STEAL', wild:false });
+  deck.push({ suit:'⚡', value:'ST', id:'ST2', steal:true, label:'STEAL', wild:false });
   return shuffle(deck);
 }
 
@@ -29,29 +41,33 @@ function shuffle(arr) {
 }
 
 // ─── Poker Evaluator (3-card) ─────────────────────────────────────────────────
+// Note : un JOKER est résolu en une carte précise (suite + valeur) dès qu'il est
+// pioché, avant d'être posé (voir selectWildValue). Une carte placée sur une
+// grille n'a donc plus jamais wild:true — pas besoin de chercher la meilleure
+// combinaison possible ici, on évalue directement la main réelle.
 function evaluate3(cards) {
-  if (!cards || cards.length !== 3 || cards.some(c => !c))
-    return { rank:0, name:'—', score:0, emoji:'' };
-  const naturals = cards.filter(c => !c.wild);
-  const wilds    = cards.filter(c =>  c.wild);
-  if (wilds.length === 3) return { rank:9, name:'3 Wilds!', score:200, emoji:'🃏' };
-  if (wilds.length > 0) {
-    let best = { rank:0, name:'High Card', score:0, emoji:'🃏' };
-    for (const s of SUITS) for (const v of VALUES) {
-      const sub = [...naturals, {suit:s,value:v}];
-      if (wilds.length === 2) {
-        for (const s2 of SUITS) for (const v2 of VALUES) {
-          const r = scoreHand([...naturals,{suit:s,value:v},{suit:s2,value:v2}]);
-          if (r.rank > best.rank) best = r;
-        }
-      } else {
-        const r = scoreHand(sub);
-        if (r.rank > best.rank) best = r;
-      }
+  const filledIdx = [0,1,2].filter(i => cards[i]);
+  if (filledIdx.length === 3) {
+    const base = scoreHand(cards);
+    if (base.name === 'Pair') {
+      // La Paire n'implique que 2 des 3 cartes — on cherche lesquelles pour
+      // exclure le kicker qui ne fait pas partie de la combinaison.
+      let pairIdx = filledIdx;
+      for (let a=0; a<3 && pairIdx===filledIdx; a++)
+        for (let b=a+1; b<3 && pairIdx===filledIdx; b++)
+          if (cards[a].value === cards[b].value) pairIdx = [a,b];
+      return { ...base, comboIdx: pairIdx };
     }
-    return best;
+    return { ...base, comboIdx: filledIdx };
   }
-  return scoreHand(cards);
+  if (filledIdx.length === 2 && cards[filledIdx[0]].value === cards[filledIdx[1]].value) {
+    // Deux cartes de même rang déjà posées : le résultat final de cette ligne
+    // ne peut être QUE Paire (si la 3e carte ne matche pas) ou Brelan (si elle
+    // matche) — jamais moins. Le score de Paire est donc déjà garanti, on
+    // le compte immédiatement plutôt que d'attendre que la ligne soit pleine.
+    return { rank:3, name:'Pair', score:10, emoji:'✌️', guaranteed:true, comboIdx:filledIdx };
+  }
+  return { rank:0, name:'—', score:0, emoji:'', comboIdx:[] };
 }
 
 function scoreHand(cards) {
@@ -65,6 +81,11 @@ function scoreHand(cards) {
   vals.forEach(v => counts[v] = (counts[v]||0)+1);
   const cv = Object.values(counts).sort((a,b) => b-a);
   const isRoyal = isFlush && vals.includes(14) && vals.includes(13) && vals.includes(12);
+  // Même rang ET même couleur sur les 3 cartes = littéralement la même carte
+  // répétée 3 fois. Impossible avec un jeu de 52 cartes classique — seul un
+  // JOKER résolu en une carte précise permet ça, donc il en faut 3 sur la même
+  // case exacte. Plus rare qu'une Straight Flush ou qu'un Mini Royal.
+  if (isFlush && cv[0]===3) return { rank:9, name:'Perfect Trips',   score:200, emoji:'💎' };
   if (isRoyal)              return { rank:8, name:'Mini Royal',      score:150, emoji:'👑' };
   if (isFlush && isStraight)return { rank:7, name:'Straight Flush',  score:100, emoji:'🔥' };
   if (cv[0]===3)            return { rank:6, name:'Three of a Kind', score:60,  emoji:'🎯' };
@@ -74,68 +95,138 @@ function scoreHand(cards) {
   return                    { rank:1, name:'High Card',              score:0,   emoji:'🃏' };
 }
 
+// Aperçu d'une main encore incomplète et incertaine (2 cartes posées sur 3) :
+// tirage couleur ou tirage suite. Purement informatif, ne rapporte aucun point
+// tant que la ligne n'est pas remplie — contrairement à la Paire (voir
+// evaluate3), un tirage peut encore ne rien donner selon la 3e carte.
+function previewHand(cards) {
+  const filled = cards.filter(Boolean);
+  if (filled.length !== 2) return null;
+  const [a, b] = filled;
+  if (a.value === b.value) return null; // géré par evaluate3 : déjà un score garanti
+  if (a.suit === b.suit)   return { name:'Flush Draw', emoji:'💧' };
+  const diff = Math.abs(VNUM[a.value] - VNUM[b.value]);
+  if (diff >= 1 && diff <= 2) return { name:'Straight Draw', emoji:'📈' };
+  return null;
+}
+
 function getLines(grid) {
   return [
     {cells:[0,1,2],label:'Row 1'},{cells:[3,4,5],label:'Row 2'},{cells:[6,7,8],label:'Row 3'},
     {cells:[0,3,6],label:'Col 1'},{cells:[1,4,7],label:'Col 2'},{cells:[2,5,8],label:'Col 3'},
     {cells:[0,4,8],label:'Diag ↘'},{cells:[2,4,6],label:'Diag ↗'},
-  ].map(l => ({ ...l, cards:l.cells.map(i=>grid[i]), ...evaluate3(l.cells.map(i=>grid[i])) }));
+  ].map(l => {
+    const cards = l.cells.map(i=>grid[i]);
+    const ev = evaluate3(cards);
+    return { ...l, cards, ...ev, comboCells: (ev.comboIdx||[]).map(idx=>l.cells[idx]), preview: previewHand(cards) };
+  });
 }
 
 function totalScore(grid) {
-  return getLines(grid).reduce((s,l) => s + (l.cards.every(Boolean) ? l.score : 0), 0);
+  return getLines(grid).reduce((s,l) => s + ((l.cards.every(Boolean) || l.guaranteed) ? l.score : 0), 0);
 }
 
 const HAND_CLR = {
-  'Mini Royal':'#FFD700','Straight Flush':'#FF6B35','Three of a Kind':'#E74C3C',
+  'Perfect Trips':'#00E5FF','Mini Royal':'#FFD700','Straight Flush':'#FF6B35','Three of a Kind':'#E74C3C',
   'Straight':'#A855F7','Flush':'#3B82F6','Pair':'#10B981','High Card':'#6B7280','—':'#374151',
+  'Flush Draw':'#3B82F6','Straight Draw':'#A855F7',
 };
 
 // ─── Card Visual ──────────────────────────────────────────────────────────────
-function CardEl({ card, onClick, glowing, dimmed, selected, size='md' }) {
+function CardEl({ card, onClick, glowing, dimmed, selected, size='md', highlight, highlightColor }) {
   if (!card) return null;
   const isRed = RED.has(card.suit);
-  const sp    = card.wild || card.steal || card.remove;
-  const d     = size==='sm' ? {w:44,h:62,fs:10,sf:16}
-              : size==='lg' ? {w:74,h:104,fs:13,sf:30}
-                            : {w:62,h:86,fs:11,sf:22};
+  const sp    = card.wild || card.steal;
+  const hc    = highlightColor || '#FFD700';
+  const d     = size==='sm' ? {w:'clamp(30px,10vw,44px)',fs:9,sf:14,rf:16}
+              : size==='lg' ? {w:'clamp(40px,13vw,66px)',fs:11,sf:23,rf:25}
+                            : {w:'clamp(36px,11.5vw,58px)',fs:9,sf:18,rf:20};
   const bg  = card.wild   ? 'linear-gradient(145deg,#1a1a2e,#16213e)'
             : card.steal  ? 'linear-gradient(145deg,#2d1b4e,#1a0f2e)'
-            : card.remove ? 'linear-gradient(145deg,#3d2d1b,#2d1f10)'
-                          : 'linear-gradient(145deg,#fff,#f0f0f0)';
+                          : 'linear-gradient(145deg,#eef6fc,#d2e5f2)';
   const clr = card.wild   ? '#FFD700'
             : card.steal  ? '#FF6B35'
-            : card.remove ? '#D4691E'
-            : isRed       ? '#C0392B'
-                          : '#1a1a2e';
+            : isRed       ? '#A93B57'
+                          : '#2C3E50';
   return (
     <div onClick={onClick} style={{
-      width:d.w, height:d.h, background:bg, borderRadius:7, flexShrink:0,
-      boxShadow: selected ? `0 0 0 3px #FFD700,0 6px 20px rgba(0,0,0,.5)`
-               : glowing  ? `0 0 14px 3px rgba(255,210,0,.55),0 3px 10px rgba(0,0,0,.4)`
-                          : `0 3px 8px rgba(0,0,0,.4)`,
-      border: selected ? '1px solid #FFD700' : '1px solid rgba(255,255,255,.2)',
+      width:d.w, aspectRatio:'0.712', background:bg, borderRadius:10, flexShrink:0,
+      boxShadow: highlight ? `0 12px 22px rgba(0,0,0,.5), 0 0 18px 4px ${hc}90`
+               : selected  ? `0 0 0 3px #FFD700,0 6px 20px rgba(0,0,0,.5)`
+               : glowing   ? `0 0 14px 3px rgba(255,210,0,.55),0 3px 10px rgba(0,0,0,.4)`
+                           : `0 3px 8px rgba(0,0,0,.35)`,
+      border: highlight ? `3px solid ${hc}`
+            : selected  ? '1px solid #FFD700'
+            : card.fromWild ? '1px solid rgba(255,215,0,.55)'
+                            : '1px solid rgba(255,255,255,.5)',
       opacity: dimmed ? .45 : 1,
       cursor: onClick ? 'pointer' : 'default',
       position:'relative', fontFamily:'Georgia,serif', userSelect:'none',
-      color:clr, overflow:'hidden', transition:'transform .15s,box-shadow .15s',
+      color:clr, overflow:'hidden', transition:'transform .18s,box-shadow .18s,border-color .18s',
+      transform: highlight ? 'scale(1.14) translateY(-4px)' : 'none',
+      zIndex: highlight ? 5 : 1,
     }}
       onMouseEnter={e=>{ if(onClick) e.currentTarget.style.transform='scale(1.09) translateY(-4px)'; }}
-      onMouseLeave={e=>{ e.currentTarget.style.transform=''; }}
+      onMouseLeave={e=>{ e.currentTarget.style.transform = highlight ? 'scale(1.14) translateY(-4px)' : 'none'; }}
     >
-      <div style={{position:'absolute',top:3,left:4,lineHeight:1,fontSize:d.fs,fontWeight:'bold'}}>
-        {sp ? <span style={{fontSize:d.fs-1}}>{card.label}</span>
-            : <><div>{card.value}</div><div style={{marginTop:-1}}>{card.suit}</div></>}
-      </div>
-      <div style={{position:'absolute',top:'50%',left:'50%',transform:'translate(-50%,-50%)',fontSize:d.sf,opacity:.9}}>
-        {card.wild ? '🃏' : card.steal ? '⚡' : card.remove ? '🗑' : card.suit}
-      </div>
-      {!sp && <div style={{position:'absolute',bottom:3,right:4,lineHeight:1,fontSize:d.fs,fontWeight:'bold',transform:'rotate(180deg)'}}>
-        <div>{card.value}</div><div style={{marginTop:-1}}>{card.suit}</div>
-      </div>}
+      {sp ? (
+        <>
+          <div style={{position:'absolute',top:3,left:4,lineHeight:1,fontSize:d.fs,fontWeight:'bold'}}>
+            <span style={{fontSize:d.fs-1}}>{card.label}</span>
+          </div>
+          <div style={{position:'absolute',top:'50%',left:'50%',transform:'translate(-50%,-50%)',fontSize:d.sf,opacity:.9}}>
+            {card.wild ? '🃏' : '⚡'}
+          </div>
+        </>
+      ) : (
+        <div style={{position:'absolute',top:'8%',left:'12%',lineHeight:1.05,textAlign:'left'}}>
+          <div style={{fontSize:d.rf,fontWeight:'bold'}}>{card.value}</div>
+          <div style={{fontSize:d.rf-7,marginTop:2}}>{card.suit}</div>
+          {netScreen === 'lobby' && (
+            <div style={{display:'flex',flexDirection:'column',gap:16,width:'100%',alignItems:'center'}}>
+              <div style={{background:'rgba(0,0,0,.4)', border:'2px solid rgba(255,215,0,.3)', borderRadius:16, padding:16, width:'100%'}}>
+                <div style={{color:'#9CA3AF', fontSize:11, letterSpacing:2, marginBottom:12}}>GAME LOBBY · {gameMode} MODE</div>
+                <div style={{display:'flex', flexDirection:'column', gap:8}}>
+                  {players.map(p => (
+                    <div key={p.id} style={{display:'flex', justifyContent:'space-between', alignItems:'center', background:'rgba(255,255,255,.05)', padding:'8px 12px', borderRadius:10}}>
+                      <span style={{color:P_CLR[p.idx], fontWeight:'bold', fontSize:14}}>{p.name} {p.idx === myPlayerIdx && '(YOU)'}</span>
+                      <span style={{fontSize:10, color:'#6EAB80'}}>● Ready</span>
+                    </div>
+                  ))}
+                  {Array.from({length: (gameMode==='2v2'?4:gameMode==='1v1v1'?3:2) - players.length}).map((_, i) => (
+                    <div key={i} style={{display:'flex', justifyContent:'space-between', alignItems:'center', background:'rgba(0,0,0,.2)', padding:'8px 12px', borderRadius:10, border:'1px dashed rgba(255,255,255,.1)'}}>
+                      <span style={{color:'#6B7280', fontSize:13}}>Waiting for player…</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {netMode === 'host' ? (
+                <button onClick={() => {
+                  connsRef.current.forEach(c => c.send({ type: 'start' }));
+                  setNetScreen('playing');
+                  startGame();
+                }} style={{
+                  padding:'16px 0',borderRadius:12,border:'none', width:'100%',
+                  background:'linear-gradient(135deg,#FFD700,#FF8C00)',color:'#1A1A2E',fontSize:15,fontWeight:'bold',
+                  cursor:'pointer',fontFamily:'Georgia,serif',
+                }}>🚀 Start Game</button>
+              ) : (
+                <p style={{color:'#6EAB80',fontSize:12,animation:'glow 2s infinite'}}>⏳ Waiting for host to start…</p>
+              )}
+
+              <button onClick={leaveGame} style={{
+                background:'none',border:'1px solid rgba(255,255,255,.2)',borderRadius:8,
+                padding:'8px 20px',color:'#9CA3AF',fontSize:12,cursor:'pointer',fontFamily:'Georgia,serif',
+              }}>← Leave</button>
+            </div>
+          )}
+        </div>
+      )}
       <div style={{position:'absolute',top:0,left:0,right:0,height:'38%',
-        background:'linear-gradient(to bottom,rgba(255,255,255,.18),transparent)',
-        borderRadius:'7px 7px 0 0',pointerEvents:'none'}}/>
+        background:'linear-gradient(to bottom,rgba(255,255,255,.4),transparent)',
+        borderRadius:'10px 10px 0 0',pointerEvents:'none'}}/>
+      {card.fromWild && <div style={{position:'absolute',bottom:2,left:3,fontSize:d.fs-2,opacity:.7}}>🃏</div>}
     </div>
   );
 }
@@ -144,7 +235,7 @@ function EmptyCell({ onClick, canPlace }) {
   return (
     <div onClick={canPlace ? onClick : undefined}
       style={{
-        width:62, height:86, borderRadius:7,
+        width:'clamp(36px,11.5vw,58px)', aspectRatio:'0.712', borderRadius:10,
         border:'2px dashed rgba(255,255,255,.16)',
         background:'rgba(255,255,255,.03)',
         cursor: canPlace ? 'pointer' : 'default',
@@ -159,52 +250,97 @@ function EmptyCell({ onClick, canPlace }) {
   );
 }
 
-function PlayerGrid({ grid, onPlace, canPlace, stealMode, onSteal, removeMode, onRemove, isActive, label, score, color }) {
+function PlayerGrid({ grid, onPlace, canPlace, stealMode, onSteal, isActive, label, score, color }) {
+  const [hoverLine, setHoverLine] = useState(null); // { cells, comboCells, name, label } | null
+  const [flashLines, setFlashLines] = useState([]);  // [{ comboCells, name }]
+  const prevCellsRef = useRef(new Set());
+
+  const scoringLines = getLines(grid).filter(l => (l.cards.every(Boolean) || l.guaranteed) && l.score > 0);
+
+  useEffect(() => {
+    const currentCells = new Set(scoringLines.flatMap(l => l.comboCells));
+    const newlyDoneLines = scoringLines.filter(l => l.comboCells.some(c => !prevCellsRef.current.has(c)));
+    prevCellsRef.current = currentCells;
+    if (newlyDoneLines.length) {
+      setFlashLines(newlyDoneLines.map(l => ({ comboCells:l.comboCells, name:l.name })));
+      const t = setTimeout(() => setFlashLines([]), 1300);
+      return () => clearTimeout(t);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [grid]);
+
+  // Carte -> couleur de surbrillance (halo teinté selon le type de main).
+  // Seules les cartes qui composent réellement la combinaison s'illuminent —
+  // pour une Paire, le kicker qui ne matche pas reste normal.
+  const highlightMap = new Map();
+  flashLines.forEach(l => l.comboCells.forEach(c => highlightMap.set(c, HAND_CLR[l.name]||'#FFD700')));
+  if (hoverLine) hoverLine.comboCells.forEach(c => highlightMap.set(c, HAND_CLR[hoverLine.name]||'#FFD700'));
+
+  const startHover = l => setHoverLine({ cells:l.cells, comboCells:l.comboCells, name:l.name, label:l.label });
+  const endHover   = () => setHoverLine(null);
+
   return (
-    <div style={{display:'flex',flexDirection:'column',alignItems:'center',gap:8}}>
+    <div style={{display:'flex',flexDirection:'column',alignItems:'center',gap:6}}>
       <div style={{
-        padding:'4px 16px', borderRadius:20,
+        padding:'3px 14px', borderRadius:20,
         background: isActive ? `${color}28` : 'rgba(255,255,255,.05)',
-        border: isActive ? `1px solid ${color}80` : '1px solid rgba(255,255,255,.1)',
+        border: isActive ? `1px solid ${color}` : '1px solid rgba(255,255,255,.1)',
         color: isActive ? color : '#9CA3AF',
-        fontSize:13, letterSpacing:2, fontWeight:'bold',
+        fontSize:12, letterSpacing:2, fontWeight:'bold',
+        boxShadow: isActive ? `0 0 16px ${color}60` : 'none',
+        animation: isActive ? 'turnPulse 1.8s ease-in-out infinite' : 'none',
         transition:'all .3s',
       }}>{label}</div>
 
+      <div style={{display:'flex',gap:4,flexWrap:'wrap',justifyContent:'center',minHeight:16,maxWidth:210}}>
+        {scoringLines.map((l,idx) => (
+          <span key={idx} title={`${l.label}: ${l.name} (+${l.score})`}
+            onMouseEnter={()=>startHover(l)}
+            onMouseLeave={endHover}
+            style={{
+              display:'inline-flex', alignItems:'center', justifyContent:'center',
+              width:18, height:18, borderRadius:6, fontSize:10, cursor:'default',
+              background:`${HAND_CLR[l.name]||'#6B7280'}25`,
+              border:`1px solid ${HAND_CLR[l.name]||'#6B7280'}90`,
+              transition:'transform .15s',
+              transform: hoverLine&&hoverLine.label===l.label ? 'scale(1.25)' : 'none',
+            }}>{l.emoji}</span>
+        ))}
+      </div>
+
       <div style={{
         background:'rgba(0,0,0,.28)',
-        border: isActive ? `2px solid ${color}50` : '2px solid rgba(255,255,255,.08)',
-        borderRadius:18, padding:14,
-        boxShadow: isActive ? `0 0 30px ${color}20` : 'none',
+        border: isActive ? `2px solid ${color}` : '2px solid rgba(255,255,255,.08)',
+        borderRadius:16, padding:10,
+        boxShadow: isActive ? `0 0 34px ${color}45` : 'none',
+        animation: isActive ? 'turnPulse 1.8s ease-in-out infinite' : 'none',
         transition:'all .3s',
       }}>
-        <div style={{display:'grid',gridTemplateColumns:'repeat(3,62px)',gridTemplateRows:'repeat(3,86px)',gap:8}}>
-          {grid.map((card,i) => (
-            <div key={i} style={{position:'relative'}}>
-              {card
-                ? <>
-                    <CardEl card={card} size='md' />
-                    {stealMode && (
-                      <div onClick={() => onSteal(i)} style={{
-                        position:'absolute', inset:0, borderRadius:7, cursor:'pointer',
-                        background:'rgba(255,107,53,.35)', border:'2px solid #FF6B35',
-                        display:'flex', alignItems:'center', justifyContent:'center',
-                        fontSize:26, animation:'stGlow 1.2s infinite',
-                      }}>⚡</div>
-                    )}
-                    {removeMode && (
-                      <div onClick={() => onRemove(i)} style={{
-                        position:'absolute', inset:0, borderRadius:7, cursor:'pointer',
-                        background:'rgba(212,105,30,.35)', border:'2px solid #D4691E',
-                        display:'flex', alignItems:'center', justifyContent:'center',
-                        fontSize:26, animation:'rmGlow 1.2s infinite',
-                      }}>🗑</div>
-                    )}
-                  </>
-                : <EmptyCell canPlace={canPlace} onClick={() => onPlace(i)} />
-              }
-            </div>
-          ))}
+        <div style={{display:'grid',gridTemplateColumns:'repeat(3,clamp(36px,11.5vw,58px))',gap:'clamp(3px,1.2vw,7px)'}}>
+          {grid.map((card,i) => {
+            const cellLines = scoringLines.filter(l=>l.cells.includes(i));
+            return (
+              <div key={i} style={{position:'relative'}}
+                onMouseEnter={()=>{ if (card && cellLines.length) startHover(cellLines[0]); }}
+                onMouseLeave={endHover}
+              >
+                {card
+                  ? <>
+                      <CardEl card={card} size='md' highlight={highlightMap.has(i)} highlightColor={highlightMap.get(i)} />
+                      {stealMode && (
+                        <div onClick={() => onSteal(i)} style={{
+                          position:'absolute', inset:0, borderRadius:7, cursor:'pointer',
+                          background:'rgba(255,107,53,.35)', border:'2px solid #FF6B35',
+                          display:'flex', alignItems:'center', justifyContent:'center',
+                          fontSize:26, animation:'stGlow 1.2s infinite', zIndex:10,
+                        }}>⚡</div>
+                      )}
+                    </>
+                  : <EmptyCell canPlace={canPlace} onClick={() => onPlace(i)} />
+                }
+              </div>
+            );
+          })}
         </div>
       </div>
 
@@ -231,17 +367,23 @@ function LinePanel({ lines, color }) {
         <div key={g.label}>
           <div style={{color:'#6B7280',fontSize:9,letterSpacing:1,margin:'6px 0 3px'}}>{g.label}</div>
           {g.items.map((l,i) => {
-            const done = l.cards.every(Boolean);
-            const c = done ? (HAND_CLR[l.name]||'#6B7280') : '#374151';
+            const complete = l.cards.every(Boolean);
+            const scored   = complete || l.guaranteed;
+            const previewClr = l.preview ? (HAND_CLR[l.preview.name]||'#6B7280') : null;
+            const c = scored ? (HAND_CLR[l.name]||'#6B7280') : (previewClr || '#374151');
             return (
               <div key={i} style={{
                 display:'flex', alignItems:'center', padding:'3px 6px', borderRadius:4, marginBottom:2,
-                background: done&&l.score>0 ? `${c}15` : 'transparent',
-                borderLeft: done&&l.score>0 ? `3px solid ${c}` : '3px solid transparent',
+                background: scored&&l.score>0 ? `${c}15` : 'transparent',
+                borderLeft: scored&&l.score>0 ? `3px solid ${c}`
+                          : (!scored&&l.preview) ? `3px dashed ${c}80`
+                          : '3px solid transparent',
               }}>
                 <span style={{color:'#9CA3AF',fontSize:9,width:44}}>{l.label}</span>
-                <span style={{color:c,fontSize:9,flex:1}}>{done ? `${l.emoji} ${l.name}` : '—'}</span>
-                <span style={{color:c,fontSize:10,fontWeight:'bold'}}>{done&&l.score>0 ? `+${l.score}` : ''}</span>
+                <span style={{color:c,fontSize:9,flex:1,fontStyle:(!scored&&l.preview)?'italic':'normal',opacity:(!scored&&l.preview)?.85:1}}>
+                  {scored ? `${l.emoji} ${l.name}${!complete?'…':''}` : l.preview ? `${l.preview.emoji} ${l.preview.name}…` : '—'}
+                </span>
+                <span style={{color:c,fontSize:10,fontWeight:'bold'}}>{scored&&l.score>0 ? `+${l.score}` : ''}</span>
               </div>
             );
           })}
@@ -253,17 +395,261 @@ function LinePanel({ lines, color }) {
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 export default function TicATacPoker() {
+  // ── Réseau : écran de menu, hôte/invité, code de partie ──
+  const [netScreen, setNetScreen] = useState('menu'); // menu | hosting | joining | playing
+  const [netMode,   setNetMode]   = useState('local'); // local | host | guest
+  const [gameMode,  setGameMode]  = useState('1v1');   // 1v1 | 2v2
+  const [roomCode,  setRoomCode]  = useState('');
+  const [joinInput, setJoinInput] = useState('');
+  const [connStatus,setConnStatus] = useState('idle'); // idle | connecting | connected | error
+  const [connErr,   setConnErr]   = useState('');
+  const peerRef = useRef(null);
+  const connsRef = useRef([]); // Multiple connections for the host
+  const [players,   setPlayers]   = useState([]); // { id, name, idx }
+  const liveRef = useRef({}); // toujours à jour après chaque rendu ; lu par les callbacks PeerJS pour éviter les closures périmées
+  const [myPlayerIdx, setMyPlayerIdx] = useState(0); // assigned by host
+
   const [deck,     setDeck]     = useState([]);
-  const [pool,     setPool]     = useState([null, null, null]); // always 3
+  const [pool,     setPool]     = useState([null, null, null, null, null]); // always 5
   const [grids,    setGrids]    = useState([Array(9).fill(null), Array(9).fill(null)]);
-  const [turn,     setTurn]     = useState(0);   // 0 = P1, 1 = P2
+  const [turn,     setTurn]     = useState(0);   // 0=P1, 1=P2, 2=P3, 3=P4
   const [phase,    setPhase]    = useState('picking'); // picking | placing | steal | wild-select
-  const [held,     setHeld]     = useState(null);  // { card, poolIdx, fromSteal, fromRemove }
-  const [stealTarget, setStealTarget] = useState(null); // which player's grid to steal from (0 or 1)
+  const [held,     setHeld]     = useState(null);  // { card, poolIdx, fromSteal }
+  const [stealTarget, setStealTarget] = useState(null); // which player's grid to steal from
   const [wildSelection, setWildSelection] = useState(null); // { color, symbol }
   const [gameOver, setGameOver] = useState(false);
-  const [finalSc,  setFinalSc]  = useState([0,0]);
+  const [finalSc,  setFinalSc]  = useState([0,0,0,0]);
   const [log,      setLog]      = useState([]);
+  const [showDetails, setShowDetails] = useState(false);
+  const detailsRef = useRef(null);
+
+  // Swappable view state (mobile-first)
+  const [viewedPlayer, setViewedPlayer] = useState(myPlayerIdx);
+  const [isMobile, setIsMobile] = useState(() => window.innerWidth < 768);
+
+  useEffect(() => {
+    const m = window.matchMedia("(max-width: 768px)");
+    const onChange = e => setIsMobile(e.matches);
+    m.addEventListener("change", onChange);
+    setIsMobile(m.matches);
+    return () => m.removeEventListener("change", onChange);
+  }, []);
+
+  // Auto-switch viewed grid or team (Phone needs it for 1v1/2v2, Fold needs it for 2v2)
+  useEffect(() => {
+    if (gameOver) return;
+
+    // In 1v1 on Fold, both grids are visible, no need to switch.
+    // In all other cases (Mobile or 2v2 on Fold), we need to switch the view automatically.
+    const needsSwitch = isMobile || gameMode === '2v2';
+    if (!needsSwitch) return;
+
+    if (netMode === 'local') {
+      // Local Pass & Play: switch to target grid for stealing, then back to active player for placing
+      if (phase === 'steal') {
+        // Switch to an opponent's team/grid
+        setViewedPlayer((turn + 1) % grids.length);
+      } else {
+        setViewedPlayer(turn);
+      }
+    } else {
+      // Online Mode
+      if (turn === myPlayerIdx && phase === 'steal') {
+        setViewedPlayer((turn + 1) % grids.length);
+      } else {
+        setViewedPlayer(myPlayerIdx);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [turn, phase, netMode, gameOver, isMobile, gameMode, myPlayerIdx, grids.length]);
+
+  // ── Envoyer l'état complet à l'adversaire (hôte uniquement, source de vérité) ──
+  const broadcastState = useCallback((overrides={}) => {
+    if (netMode !== 'host' || connsRef.current.length === 0) return;
+    const fullState = {
+      deck, pool, grids, turn, phase, held, stealTarget, gameOver, finalSc, log, gameMode, players,
+      ...overrides,
+    };
+    connsRef.current.forEach(c => {
+      if (c.open) c.send({ type:'state', payload: fullState });
+    });
+  }, [netMode, deck, pool, grids, turn, phase, held, stealTarget, gameOver, finalSc, log, gameMode, players]);
+
+  // ── Appliquer un instantané d'état reçu de l'hôte (invité uniquement) ──
+  const applyRemoteState = useCallback(payload => {
+    if (payload.deck        !== undefined) setDeck(payload.deck);
+    if (payload.pool        !== undefined) setPool(payload.pool);
+    if (payload.grids       !== undefined) setGrids(payload.grids);
+    if (payload.turn        !== undefined) setTurn(payload.turn);
+    if (payload.phase       !== undefined) setPhase(payload.phase);
+    if (payload.held        !== undefined) setHeld(payload.held);
+    if (payload.stealTarget !== undefined) setStealTarget(payload.stealTarget);
+    if (payload.gameOver    !== undefined) setGameOver(payload.gameOver);
+    if (payload.finalSc     !== undefined) setFinalSc(payload.finalSc);
+    if (payload.log         !== undefined) setLog(payload.log);
+    if (payload.gameMode    !== undefined) setGameMode(payload.gameMode);
+    if (payload.players     !== undefined) setPlayers(payload.players);
+  }, []);
+
+  // ── Envoyer une action à l'hôte (invité uniquement) ──
+  const sendAction = (name, args=[]) => {
+    // For guest, there is only one connection in connsRef
+    const c = connsRef.current[0];
+    if (c && c.open) c.send({ type:'action', name, args });
+  };
+
+  // ── Câblage commun d'une connexion PeerJS établie (côté hôte ET invité) ──
+  const wireConnection = c => {
+    c.on('open', () => {
+      if (liveRef.current.netMode === 'host') {
+        // Host: assign a player index to the new guest
+        const live = liveRef.current;
+        const maxP = live.gameMode === '2v2' ? 4 : (live.gameMode === '1v1v1' ? 3 : 2);
+        if (live.players.length >= maxP) {
+          c.send({ type: 'error', payload: { msg: 'This room is already full.' }});
+          setTimeout(() => c.close(), 500);
+          return;
+        }
+
+        connsRef.current.push(c);
+        const newIdx = live.players.length; // Host is 0, guests are 1, 2, 3
+        const newPlayers = [...live.players, { id: c.peer, idx: newIdx, name: `Player ${newIdx+1}` }];
+        setPlayers(newPlayers);
+        setConnStatus('connected');
+        setNetScreen('lobby');
+        // Welcome the guest and tell them their index
+        c.send({ type: 'welcome', payload: { myPlayerIdx: newIdx, gameMode: live.gameMode, players: newPlayers }});
+        // Update other guests about the new player
+        connsRef.current.forEach(otherC => {
+          if (otherC !== c && otherC.open) otherC.send({ type: 'state', payload: { players: newPlayers }});
+        });
+      } else {
+        // Guest: wait for welcome message
+        setConnStatus('connected');
+        setNetScreen('lobby');
+        connsRef.current = [c];
+      }
+    });
+    c.on('data', data => {
+      const live = liveRef.current;
+      if (data.type === 'welcome' && live.netMode === 'guest') {
+        setMyPlayerIdx(data.payload.myPlayerIdx);
+        setGameMode(data.payload.gameMode);
+        setPlayers(data.payload.players);
+      }
+      if (data.type === 'error' && live.netMode === 'guest') {
+        setConnStatus('error');
+        setConnErr(data.payload.msg);
+      }
+      if (data.type === 'start') {
+        setNetScreen('playing');
+      }
+      if (data.type === 'state' && live.netMode === 'guest') live.applyRemoteState(data.payload);
+      if (data.type === 'action' && live.netMode === 'host')  live.handleRemoteAction(data);
+    });
+    c.on('close', () => {
+      if (liveRef.current.netMode === 'host') {
+        connsRef.current = connsRef.current.filter(conn => conn !== c);
+        // Simplified: just show error for now if someone leaves
+        setConnStatus('error');
+        setConnErr("A player has disconnected.");
+      } else {
+        setConnStatus('error');
+        setConnErr("Connection lost with the host.");
+      }
+    });
+  };
+
+  const startHosting = (fixedCode) => {
+    setNetMode('host');
+    setNetScreen('hosting');
+    setConnStatus('connecting');
+    setPlayers([{ id: 'host', idx: 0, name: 'Host (P1)' }]);
+    setMyPlayerIdx(0);
+    const code = fixedCode || makeRoomCode();
+    const p = new Peer(ROOM_PREFIX + code);
+    peerRef.current = p;
+    p.on('open', () => { setRoomCode(code); setConnStatus('waiting'); });
+    p.on('connection', c => wireConnection(c));
+    p.on('error', err => {
+      if (err.type === 'unavailable-id' && !fixedCode) { p.destroy(); startHosting(); return; }
+      setConnStatus('error');
+      setConnErr(err.type === 'network'
+        ? 'Network error. Check your internet connection.'
+        : 'Could not create the game room (Error: ' + err.type + ')');
+    });
+  };
+
+  const handleQuickJoin = () => {
+    const quickCode = 'QUICK';
+    setNetMode('guest');
+    setNetScreen('joining');
+    setConnStatus('connecting');
+    setJoinInput(quickCode);
+    const p = new Peer();
+    peerRef.current = p;
+    p.on('open', () => {
+      const c = p.connect(ROOM_PREFIX + quickCode, { reliable:true });
+      wireConnection(c);
+    });
+    p.on('error', err => {
+      if (err.type === 'peer-unavailable') {
+        // Personne ne hoste 'QUICK', on devient l'hôte
+        p.destroy();
+        startHosting(quickCode);
+      } else {
+        setConnStatus('error');
+        setConnErr('Quick Join failed: ' + err.type);
+      }
+    });
+  };
+
+  const startJoining = (fixedCode) => {
+    const code = fixedCode || joinInput.trim().toUpperCase();
+    if (!code) return;
+    setNetMode('guest');
+    setNetScreen('joining');
+    setConnStatus('connecting');
+    const p = new Peer();
+    peerRef.current = p;
+    p.on('open', () => {
+      const c = p.connect(ROOM_PREFIX + code, { reliable:true });
+      c.on('error', () => { setConnStatus('error'); setConnErr("Couldn't reach that game code. Check it and try again."); });
+      wireConnection(c);
+    });
+    p.on('error', err => {
+      setConnStatus('error');
+      if (err.type === 'peer-unavailable') {
+        setConnErr(`Room "${code}" not found. Check the code and try again.`);
+      } else if (err.type === 'network') {
+        setConnErr('Network error. Check your internet connection.');
+      } else {
+        setConnErr('Connection error: ' + err.type);
+      }
+    });
+  };
+
+  const leaveGame = () => {
+    connsRef.current.forEach(c => c.close());
+    if (peerRef.current) peerRef.current.destroy();
+    connsRef.current = []; peerRef.current = null;
+    setNetScreen('menu'); setNetMode('local'); setConnStatus('idle'); setConnErr('');
+    setRoomCode(''); setJoinInput(''); setPlayers([]); setMyPlayerIdx(0);
+  };
+
+  useEffect(() => () => { // cleanup on unmount
+    connsRef.current.forEach(c => c.close());
+    if (peerRef.current) peerRef.current.destroy();
+  }, []);
+
+  useEffect(() => {
+    if (!showDetails) return;
+    const handleOutside = e => {
+      if (detailsRef.current && !detailsRef.current.contains(e.target)) setShowDetails(false);
+    };
+    document.addEventListener('mousedown', handleOutside);
+    return () => document.removeEventListener('mousedown', handleOutside);
+  }, [showDetails]);
 
   const addLog = useCallback((msg, clr='#D1D5DB') => {
     setLog(p => [{msg,clr,id:Date.now()+Math.random()}, ...p].slice(0,50));
@@ -277,57 +663,84 @@ export default function TicATacPoker() {
   };
 
   const startGame = useCallback(() => {
+    if (netMode === 'guest') { sendAction('startGame'); return; }
     const d = buildDeck();
-    const p = [null, null, null];
+    const p = [null, null, null, null, null];
     const rem = [...d];
-    for (let i=0; i<3; i++) if (rem.length) p[i] = rem.shift();
+    for (let i=0; i<5; i++) if (rem.length) p[i] = rem.shift();
+    const numPlayers = gameMode === '2v2' ? 4 : (gameMode === '1v1v1' ? 3 : 2);
+    const newGrids = Array.from({length:numPlayers}, () => Array(9).fill(null));
     setDeck(rem); setPool(p);
-    setGrids([Array(9).fill(null), Array(9).fill(null)]);
+    setGrids(newGrids);
     setTurn(0); setPhase('picking'); setHeld(null); setStealTarget(null); setWildSelection(null);
-    setGameOver(false); setFinalSc([0,0]); setLog([]);
-    addLog('🃏 New game! Player 1 picks first.','#FFD700');
-  }, [addLog]);
-
-  useEffect(() => { startGame(); }, []);
+    setGameOver(false); setFinalSc(Array(numPlayers).fill(0)); setLog([]);
+    addLog(`🃏 New game! ${gameMode} Mode. Player 1 picks first.`,`#FFD700`);
+    if (netMode === 'host') broadcastState({
+      deck:rem, pool:p, grids:newGrids, turn:0, phase:'picking', held:null,
+      stealTarget:null, gameOver:false, finalSc:Array(numPlayers).fill(0), log:[], gameMode
+    });
+  }, [addLog, netMode, broadcastState, gameMode]);
 
   // ── Pick a card from the pool ──
   const pickCard = (poolIdx) => {
+    if (netMode === 'guest') { sendAction('pickCard', [poolIdx]); return; }
     if (phase !== 'picking' || gameOver || !pool[poolIdx]) return;
     const card = pool[poolIdx];
-    setHeld({ card, poolIdx, fromSteal: false, fromRemove: false });
+    const newHeld = { card, poolIdx, fromSteal: false };
+    setHeld(newHeld);
 
     if (card.steal) {
-      // Ask which player's grid to steal from — opposite player's grid
-      const opponent = 1 - turn;
-      setStealTarget(opponent);
+      // Ask which player's grid to steal from — opposite team's grids
+      // In 1v1: turn 0 steals from 1, turn 1 from 0.
+      // In 2v2: Team A (0,2) steals from Team B (1,3).
       setPhase('steal');
-      addLog(`⚡ ${turn===0?'P1':'P2'} grabbed STEAL — click a card on opponent's grid!`, '#FF6B35');
-    } else if (card.remove) {
-      // Remove mode: player clicks one of their own cards to delete it
-      setPhase('remove-own');
-      addLog(`🗑 ${turn===0?'P1':'P2'} grabbed REMOVE — click one of your own cards to delete!`, '#D4691E');
+      addLog(`⚡ P${turn+1} grabbed STEAL — click a card on opponent's grid!`, '#FF6B35');
+      if (netMode === 'host') broadcastState({ held:newHeld, phase:'steal' });
     } else if (card.wild) {
       setPhase('wild-select');
       addLog(`${turn===0?'🔵 P1':'🔴 P2'} picked 🃏 WILD — choose color and symbol!`, P_CLR[turn]);
+      if (netMode === 'host') broadcastState({ held:newHeld, phase:'wild-select' });
     } else {
       setPhase('placing');
       addLog(`${turn===0?'🔵 P1':'🔴 P2'} picked ${card.value+card.suit}.`, P_CLR[turn]);
+      if (netMode === 'host') broadcastState({ held:newHeld, phase:'placing' });
     }
   };
 
-  // ── Select wild card properties ──
-  const selectWild = (symbol) => {
+  // ── Select wild card: step 1, choose suit ──
+  const selectWildSuit = (suit) => {
     if (phase !== 'wild-select' || !held || gameOver) return;
-    // symbolColor is determined by the symbol itself
-    const updatedCard = { ...held.card, suit: symbol };
-    setHeld({ ...held, card: updatedCard });
-    setPhase('placing');
-    addLog(`${turn===0?'🔵 P1':'🔴 P2'} set WILD to ${symbol}.`, P_CLR[turn]);
-    setWildSelection(null);
+    setWildSelection({ suit });
   };
+
+  // ── Select wild card: step 2, choose value — this locks in one real card ──
+  const selectWildValue = (value, remoteSuit) => {
+    const suit = remoteSuit || wildSelection?.suit;
+    if (phase !== 'wild-select' || !held || !suit || gameOver) return;
+    if (netMode === 'guest') { sendAction('selectWildValue', [value, suit]); setWildSelection(null); return; }
+    // The Joker becomes a genuine, concrete card from now on: it scores and
+    // renders exactly like any other card of that suit/value (no more
+    // auto-picking the best possible combo — the player commits to a choice).
+    const finalCard = {
+      ...held.card,
+      suit, value,
+      wild: false,
+      fromWild: true, // cosmetic-only marker, doesn't affect scoring
+      label: undefined,
+    };
+    const newHeld = { ...held, card: finalCard };
+    setHeld(newHeld);
+    setPhase('placing');
+    addLog(`${turn===0?'🔵 P1':'🔴 P2'} turned 🃏 WILD into ${value}${suit}.`, P_CLR[turn]);
+    setWildSelection(null);
+    if (netMode === 'host') broadcastState({ held:newHeld, phase:'placing' });
+  };
+
+  const cancelWildSuit = () => setWildSelection(null);
 
   // ── Place held card on own grid ──
   const placeCard = (cellIdx) => {
+    if (netMode === 'guest') { sendAction('placeCard', [cellIdx]); return; }
     if (phase !== 'placing' || !held || gameOver) return;
     if (grids[turn][cellIdx]) return;
 
@@ -351,67 +764,99 @@ export default function TicATacPoker() {
       setFinalSc(sc); setGameOver(true); setPhase('over'); setHeld(null);
       addLog(`🏁 Game over! P1: ${sc[0]} | P2: ${sc[1]}`, '#FFD700');
       addLog(sc[0]>sc[1]?'🏆 Player 1 wins!':sc[1]>sc[0]?'🏆 Player 2 wins!':'🤝 Tie!', '#FFD700');
+      if (netMode === 'host') broadcastState({
+        grids:newGrids, pool:newPool, deck:newDeck, finalSc:sc, gameOver:true, phase:'over', held:null,
+      });
       return;
     }
 
     advanceTurn(newPool, newDeck, newGrids);
   };
 
-  // ── Remove a card from opponent's grid ──
-  const stealCard = (cellIdx) => {
-    if (phase !== 'steal' || stealTarget === null || !held || gameOver) return;
-    if (!grids[stealTarget][cellIdx]) return;
+  // ── Steal a card from opponent's grid ──
+  const stealCard = (cellIdx, targetIdx) => {
+    const target = targetIdx !== undefined ? targetIdx : stealTarget;
+    if (netMode === 'guest') { sendAction('stealCard', [cellIdx, target]); return; }
+    if (phase !== 'steal' || target === null || !held || gameOver) return;
+    if (!grids[target][cellIdx]) return;
 
-    const stolen = grids[stealTarget][cellIdx];
+    const stolen = grids[target][cellIdx];
     const newGrids = grids.map(g => [...g]);
-    newGrids[stealTarget][cellIdx] = null;
+    newGrids[target][cellIdx] = null;
 
     const { pool:newPool, deck:newDeck } = refill(pool, deck, held.poolIdx);
     setGrids(newGrids); setPool(newPool); setDeck(newDeck);
-    addLog(`⚡ ${turn===0?'🔵 P1':'🔴 P2'} STOLE ${stolen.wild?'WILD':stolen.value+stolen.suit} from opponent!`, '#FF6B35');
+    addLog(`⚡ P${turn+1} STOLE card from P${target+1}!`, '#FF6B35');
 
     // Now the stolen card is held and player must place it on their own grid
-    setHeld({ card: stolen, poolIdx: null, fromSteal: true, fromRemove: false });
+    const newHeld = { card: stolen, poolIdx: null, fromSteal: true };
+    setHeld(newHeld);
     setPhase('placing');
     setStealTarget(null);
+    if (netMode === 'host') broadcastState({
+      grids:newGrids, pool:newPool, deck:newDeck, held:newHeld, phase:'placing', stealTarget:null,
+    });
   };
 
-  // ── Remove one of your own cards ──
-  const removeOwnCard = (cellIdx) => {
-    if (phase !== 'remove-own' || !held || gameOver) return;
-    if (!grids[turn][cellIdx]) return;
-
-    const deleted = grids[turn][cellIdx];
-    const newGrids = grids.map(g => [...g]);
-    newGrids[turn][cellIdx] = null;
-
-    const { pool:newPool, deck:newDeck } = refill(pool, deck, held.poolIdx);
-    setGrids(newGrids); setPool(newPool); setDeck(newDeck);
-    addLog(`🗑 ${turn===0?'🔵 P1':'🔴 P2'} DELETED their own ${deleted.wild?'WILD':deleted.value+deleted.suit}!`, '#D4691E');
-
-    // Remove action is complete, advance turn
-    const bothFull = newGrids.every(g => g.every(Boolean));
-    if (bothFull) {
-      const sc = newGrids.map(g => totalScore(g));
-      setFinalSc(sc); setGameOver(true); setPhase('over'); setHeld(null);
-      addLog(`🏁 Game over! P1: ${sc[0]} | P2: ${sc[1]}`, '#FFD700');
-      addLog(sc[0]>sc[1]?'🏆 Player 1 wins!':sc[1]>sc[0]?'🏆 Player 2 wins!':'🤝 Tie!', '#FFD700');
-      return;
-    }
-    advanceTurn(newGrids, newPool, newDeck);
+  // ── Annuler la sélection en cours (remet la carte en jeu dans le pool) ──
+  const unselectCard = () => {
+    if (netMode === 'guest') { sendAction('unselectCard'); return; }
+    if (!held || held.fromSteal || gameOver) return;
+    // La carte tenue n'a jamais quitté le pool (elle n'est retirée qu'au moment
+    // du placement), donc il suffit de revenir en phase "picking".
+    setHeld(null);
+    setPhase('picking');
+    setWildSelection(null);
+    addLog(`↩️ ${turn===0?'P1':'P2'} a reposé sa carte.`, '#9CA3AF');
+    if (netMode === 'host') broadcastState({ held:null, phase:'picking' });
   };
 
   const advanceTurn = (newPool, newDeck, newGrids) => {
-    const nextTurn = 1 - turn;
-    // Check if next player still has empty cells; if both full, end game
-    const bothFull = newGrids.every(g => g.every(Boolean));
-    if (bothFull) {
+    const allFull = newGrids.every(g => g.every(Boolean));
+    if (allFull) {
       const sc = newGrids.map(g => totalScore(g));
       setFinalSc(sc); setGameOver(true); setPhase('over'); setHeld(null);
+      if (netMode === 'host') broadcastState({
+        grids:newGrids, pool:newPool, deck:newDeck, finalSc:sc, gameOver:true, phase:'over', held:null,
+      });
       return;
     }
-    setTurn(nextTurn); setPhase('picking'); setHeld(null); setStealTarget(null);
+
+    const numP = gameMode === '2v2' ? 4 : (gameMode === '1v1v1' ? 3 : 2);
+    let nextTurn = (turn + 1) % numP;
+    // Skip players whose grid is already full
+    while (newGrids[nextTurn].every(Boolean)) {
+      addLog(`⏭️ P${nextTurn+1}'s grid is full — skipping!`, '#FFD700');
+      nextTurn = (nextTurn + 1) % numP;
+    }
+
+    setTurn(nextTurn); setPool(newPool); setDeck(newDeck); setGrids(newGrids);
+    setPhase('picking'); setHeld(null); setStealTarget(null);
+    if (netMode === 'host') broadcastState({
+      turn:nextTurn, pool:newPool, deck:newDeck, grids:newGrids, phase:'picking', held:null, stealTarget:null,
+    });
   };
+
+  // ── Hôte : exécute une action reçue de l'invité, comme si elle venait d'un clic local ──
+  function handleRemoteAction(msg) {
+    switch (msg.name) {
+      case 'pickCard':        pickCard(...msg.args); break;
+      case 'placeCard':       placeCard(...msg.args); break;
+      case 'stealCard':       stealCard(...msg.args); break;
+      case 'selectWildValue': selectWildValue(...msg.args); break;
+      case 'unselectCard':    unselectCard(); break;
+      case 'startGame':       startGame(); break;
+      default: break;
+    }
+  }
+
+  // Tenu à jour après CHAQUE rendu (pas de tableau de dépendances) : c'est ce
+  // que lisent les callbacks PeerJS enregistrés une seule fois, pour toujours
+  // agir sur l'état et les fonctions les plus récents plutôt que sur une
+  // closure figée au moment de la connexion.
+  useEffect(() => {
+    liveRef.current = { netMode, applyRemoteState, handleRemoteAction, startGame, gameMode, players };
+  });
 
   const scores = grids.map(g => totalScore(g));
   const lines  = grids.map(g => getLines(g));
@@ -420,19 +865,18 @@ export default function TicATacPoker() {
   const gClr   = {S:'#FFD700',A:'#FF6B35',B:'#A855F7',C:'#3B82F6',D:'#10B981',F:'#6B7280'};
 
   const isSteal   = phase === 'steal';
-  const isRemove  = phase === 'remove-own';
+  const canIAct = netMode === 'local' || (turn % players.length === myPlayerIdx);
   const isWild    = phase === 'wild-select';
   const turnClr   = P_CLR[turn];
-  const phaseMsg  = phase==='picking'  ? `${turn===0?'Player 1 🔵':'Player 2 🔴'} — choose a card from the pool`
-                  : phase==='placing'  ? `${turn===0?'Player 1 🔵':'Player 2 🔴'} — place your card on your grid`
-                  : phase==='wild-select' ? `${turn===0?'Player 1 🔵':'Player 2 🔴'} — choose wild card color and symbol`
-                  : phase==='steal'    ? `${turn===0?'Player 1 🔵':'Player 2 🔴'} — click a card on the opponent's grid to steal!`
-                  : phase==='remove-own'   ? `${turn===0?'Player 1 🔵':'Player 2 🔴'} — click one of your own cards to delete!`
+  const phaseMsg  = phase==='picking'  ? `P${turn+1} — choose a card from the pool`
+                  : phase==='placing'  ? `P${turn+1} — place your card on your grid`
+                  : phase==='wild-select' ? `P${turn+1} — choose exactly which card your JOKER becomes`
+                  : phase==='steal'    ? `P${turn+1} — click a card on the opponent's grid to steal!`
                   : 'Game Over';
 
   return (
-    <div style={{
-      minHeight:'100vh',
+    <div className="app-shell" style={{
+      minHeight:'100vh', overflowX:'hidden', width:'100%',
       background:'radial-gradient(ellipse at 50% 0%,#1B5E3A 0%,#0F3D22 40%,#061A0F 100%)',
       display:'flex', flexDirection:'column', alignItems:'center',
       padding:'20px 12px 40px', fontFamily:"Georgia,'Times New Roman',serif",
@@ -440,40 +884,305 @@ export default function TicATacPoker() {
       <style>{`
         @keyframes glow{0%,100%{box-shadow:0 0 12px rgba(255,215,0,.2);}50%{box-shadow:0 0 28px rgba(255,215,0,.6);}}
         @keyframes stGlow{0%,100%{box-shadow:0 0 10px rgba(255,107,53,.3);}50%{box-shadow:0 0 28px rgba(255,107,53,.8);}}
-        @keyframes rmGlow{0%,100%{box-shadow:0 0 10px rgba(212,105,30,.3);}50%{box-shadow:0 0 28px rgba(212,105,30,.8);}}
         @keyframes in{from{opacity:0;transform:translateY(-6px);}to{opacity:1;transform:translateY(0);}}
         @keyframes pop{0%{transform:scale(.75);}60%{transform:scale(1.08);}100%{transform:scale(1);}}
+        @keyframes panelIn{from{opacity:0;transform:translate(8px,-8px) scale(.97);}to{opacity:1;transform:translate(0,0) scale(1);}}
+        @keyframes turnPulse{0%,100%{filter:brightness(1);}50%{filter:brightness(1.25);}}
+
+        /* Mise en page des 3 colonnes (grille P1 / pool / grille P2) : empilées
+           verticalement par défaut (téléphones, plié, déplié en portrait), et
+           uniquement côte à côte quand il y a clairement la place — on évite
+           ainsi le flex-wrap partiel où 2 colonnes tiennent et la 3e retombe
+           toute seule en dessous. */
+        .board-3col {
+          display:flex; flex-direction:column; align-items:center;
+          gap:12px; width:100%;
+        }
+        @media (min-width:768px) {
+          .board-3col { flex-direction:row; justify-content:center; align-items:flex-start; gap:14px; width:auto; }
+        }
+        @media (max-height:700px) {
+          .app-shell { padding-top:8px !important; padding-bottom:16px !important; }
+          .app-title { margin-bottom:2px !important; }
+          .app-subtitle { display:none; }
+        }
       `}</style>
 
+      {netScreen !== 'playing' && (
+        <div style={{
+          minHeight:'80vh', display:'flex', flexDirection:'column', alignItems:'center',
+          justifyContent:'center', gap:18, width:'100%', maxWidth:380, textAlign:'center',
+        }}>
+          <h1 style={{margin:0,fontSize:'clamp(1.4rem,6vw,2.1rem)',color:'#FFD700',
+            letterSpacing:3,textShadow:'0 0 28px rgba(255,215,0,.45)',fontStyle:'italic'}}>
+            ♠ TIC-A-TAC POKER ♠
+          </h1>
+
+          {netScreen === 'menu' && (
+            <div style={{display:'flex',flexDirection:'column',gap:12,width:'100%'}}>
+              {/* Mode Toggle */}
+              <div style={{
+                display:'flex', gap:4, background:'rgba(0,0,0,.3)', padding:4, borderRadius:12,
+                border:'1px solid rgba(255,255,255,.1)', marginBottom:8, overflowX:'auto'
+              }}>
+                {['1v1', '1v1v1', '2v2'].map(m => (
+                  <button key={m} onClick={() => setGameMode(m)} style={{
+                    flex:1, padding:'8px 4px', borderRadius:8, border:'none', minWidth:60,
+                    background: gameMode === m ? 'rgba(255,215,0,.15)' : 'transparent',
+                    color: gameMode === m ? '#FFD700' : '#9CA3AF',
+                    fontSize:11, fontWeight:'bold', cursor:'pointer', transition:'all .2s'
+                  }}>{m}</button>
+                ))}
+              </div>
+
+              <button onClick={()=>{ setNetMode('local'); setNetScreen('playing'); startGame(); }} style={{
+                padding:'16px 0',borderRadius:12,border:'1px solid rgba(255,215,0,.4)',
+                background:'rgba(255,215,0,.08)',color:'#FFD700',fontSize:15,fontWeight:'bold',
+                cursor:'pointer',fontFamily:'Georgia,serif',
+              }}>🎮 Play Locally (pass &amp; play)</button>
+              <button onClick={handleQuickJoin} style={{
+                padding:'16px 0',borderRadius:12,border:'none',
+                background:'linear-gradient(135deg,#FFD700,#FF8C00)',color:'#1A1A2E',fontSize:15,fontWeight:'bold',
+                cursor:'pointer',fontFamily:'Georgia,serif',
+              }}>⚡ Quick Join</button>
+              <button onClick={startHosting} style={{
+                padding:'16px 0',borderRadius:12,border:'1px solid rgba(255,215,0,.4)',
+                background:'rgba(255,215,0,.08)',color:'#FFD700',fontSize:15,fontWeight:'bold',
+                cursor:'pointer',fontFamily:'Georgia,serif',
+              }}>📡 Host Online Game</button>
+              <button onClick={()=>setNetScreen('joining')} style={{
+                padding:'16px 0',borderRadius:12,border:'1px solid rgba(75,158,255,.5)',
+                background:'rgba(75,158,255,.1)',color:'#4B9EFF',fontSize:15,fontWeight:'bold',
+                cursor:'pointer',fontFamily:'Georgia,serif',
+              }}>🔗 Join Online Game</button>
+              <p style={{color:'#6EAB80',fontSize:11,marginTop:8}}>
+                Online play needs a brief internet connection to pair the two devices, then the game runs directly between you.
+              </p>
+            </div>
+          )}
+
+          {netScreen === 'hosting' && (
+            <div style={{display:'flex',flexDirection:'column',gap:14,width:'100%',alignItems:'center'}}>
+              <p style={{color:'#9CA3AF',fontSize:13}}>Give this code to the other player:</p>
+              {roomCode ? (
+                <div style={{
+                  fontSize:'clamp(1.8rem,10vw,2.6rem)',fontWeight:'bold',letterSpacing:6,color:'#FFD700',
+                  background:'rgba(0,0,0,.4)',border:'2px solid rgba(255,215,0,.4)',borderRadius:14,
+                  padding:'14px 10px',width:'100%',
+                }}>{roomCode}</div>
+              ) : (
+                <div style={{color:'#9CA3AF',fontSize:13}}>Generating code…</div>
+              )}
+              {connStatus==='waiting' && <p style={{color:'#6EAB80',fontSize:12,animation:'glow 2s infinite'}}>⏳ Waiting for the other player to join…</p>}
+              {connStatus==='error' && <p style={{color:'#FF6B6B',fontSize:12}}>⚠️ {connErr}</p>}
+              <button onClick={leaveGame} style={{
+                marginTop:6,background:'none',border:'1px solid rgba(255,255,255,.2)',borderRadius:8,
+                padding:'8px 20px',color:'#9CA3AF',fontSize:12,cursor:'pointer',fontFamily:'Georgia,serif',
+              }}>← Cancel</button>
+            </div>
+          )}
+
+          {netScreen === 'joining' && (
+            <div style={{display:'flex',flexDirection:'column',gap:14,width:'100%',alignItems:'center'}}>
+              <p style={{color:'#9CA3AF',fontSize:13}}>Enter the code shown on the host's screen:</p>
+              <input value={joinInput} onChange={e=>setJoinInput(e.target.value.toUpperCase())}
+                placeholder="ABCDE" maxLength={5} autoCapitalize="characters"
+                style={{
+                  fontSize:'1.6rem',fontWeight:'bold',letterSpacing:6,textAlign:'center',color:'#FFD700',
+                  background:'rgba(0,0,0,.4)',border:'2px solid rgba(75,158,255,.4)',borderRadius:14,
+                  padding:'12px 10px',width:'100%',fontFamily:'Georgia,serif',
+                }}
+              />
+              <button onClick={startJoining} disabled={connStatus==='connecting'} style={{
+                padding:'12px 0',borderRadius:12,border:'none',width:'100%',
+                background:'linear-gradient(135deg,#4B9EFF,#2E6FE0)',color:'#fff',fontSize:14,fontWeight:'bold',
+                cursor: connStatus==='connecting' ? 'default' : 'pointer', opacity: connStatus==='connecting'?.6:1,
+                fontFamily:'Georgia,serif',
+              }}>{connStatus==='connecting' ? '⏳ Connecting…' : '🔗 Connect'}</button>
+              {connStatus==='error' && <p style={{color:'#FF6B6B',fontSize:12}}>⚠️ {connErr}</p>}
+              <button onClick={leaveGame} style={{
+                marginTop:2,background:'none',border:'1px solid rgba(255,255,255,.2)',borderRadius:8,
+                padding:'8px 20px',color:'#9CA3AF',fontSize:12,cursor:'pointer',fontFamily:'Georgia,serif',
+              }}>← Back</button>
+            </div>
+          )}
+          {netScreen === 'lobby' && (
+            <div style={{display:'flex',flexDirection:'column',gap:16,width:'100%',alignItems:'center'}}>
+              <div style={{background:'rgba(0,0,0,.4)', border:'2px solid rgba(255,215,0,.3)', borderRadius:16, padding:16, width:'100%'}}>
+                <div style={{color:'#9CA3AF', fontSize:11, letterSpacing:2, marginBottom:12}}>GAME LOBBY · {gameMode} MODE</div>
+                <div style={{display:'flex', flexDirection:'column', gap:8}}>
+                  {players.map(p => (
+                    <div key={p.id} style={{display:'flex', justifyContent:'space-between', alignItems:'center', background:'rgba(255,255,255,.05)', padding:'8px 12px', borderRadius:10}}>
+                      <span style={{color:P_CLR[p.idx], fontWeight:'bold', fontSize:14}}>{p.name} {p.idx === myPlayerIdx && '(YOU)'}</span>
+                      <span style={{fontSize:10, color:'#6EAB80'}}>● Ready</span>
+                    </div>
+                  ))}
+                  {Array.from({length: (gameMode==='2v2'?4:gameMode==='1v1v1'?3:2) - players.length}).map((_, i) => (
+                    <div key={i} style={{display:'flex', justifyContent:'space-between', alignItems:'center', background:'rgba(0,0,0,.2)', padding:'8px 12px', borderRadius:10, border:'1px dashed rgba(255,255,255,.1)'}}>
+                      <span style={{color:'#6B7280', fontSize:13}}>Waiting for player…</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {netMode === 'host' ? (
+                <button onClick={() => {
+                  connsRef.current.forEach(c => c.send({ type: 'start' }));
+                  setNetScreen('playing');
+                  startGame();
+                }} style={{
+                  padding:'16px 0',borderRadius:12,border:'none', width:'100%',
+                  background:'linear-gradient(135deg,#FFD700,#FF8C00)',color:'#1A1A2E',fontSize:15,fontWeight:'bold',
+                  cursor:'pointer',fontFamily:'Georgia,serif',
+                }}>🚀 Start Game</button>
+              ) : (
+                <p style={{color:'#6EAB80',fontSize:12,animation:'glow 2s infinite'}}>⏳ Waiting for host to start…</p>
+              )}
+
+              <button onClick={leaveGame} style={{
+                background:'none',border:'1px solid rgba(255,255,255,.2)',borderRadius:8,
+                padding:'8px 20px',color:'#9CA3AF',fontSize:12,cursor:'pointer',fontFamily:'Georgia,serif',
+              }}>← Leave</button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {netScreen === 'playing' && (<>
+
+      {/* Navigation & Info Icons */}
+      <div style={{ position:'fixed', top:16, left:16, zIndex:100, display:'flex', gap:8 }}>
+        <button onClick={leaveGame} title="Back to Menu" style={{
+          width:42, height:42, borderRadius:'50%',
+          background:'rgba(0,0,0,.5)', border:'1px solid rgba(255,255,255,.2)',
+          color:'#9CA3AF', fontSize:18, cursor:'pointer',
+          display:'flex', alignItems:'center', justifyContent:'center',
+          boxShadow:'0 4px 14px rgba(0,0,0,.4)', transition:'all .2s',
+        }}
+          onMouseEnter={e=>{ e.currentTarget.style.background='rgba(0,0,0,.7)'; e.currentTarget.style.borderColor='rgba(255,255,255,.4)'; }}
+          onMouseLeave={e=>{ e.currentTarget.style.background='rgba(0,0,0,.5)'; e.currentTarget.style.borderColor='rgba(255,255,255,.2)'; }}
+        >🏠</button>
+      </div>
+
+      <div style={{ position:'fixed', top:16, right:16, zIndex:100, display:'flex', gap:8 }}>
+        <button onClick={startGame} title={gameOver?'New Game':'Restart'} style={{
+          width:42, height:42, borderRadius:'50%',
+          background:'rgba(0,0,0,.5)', border:'1px solid rgba(255,215,0,.4)',
+          color:'#FFD700', fontSize:18, cursor:'pointer',
+          display:'flex', alignItems:'center', justifyContent:'center',
+          boxShadow:'0 4px 14px rgba(0,0,0,.4)', transition:'all .2s',
+        }}
+          onMouseEnter={e=>{ e.currentTarget.style.background='rgba(0,0,0,.7)'; e.currentTarget.style.transform='scale(1.1)'; }}
+          onMouseLeave={e=>{ e.currentTarget.style.background='rgba(0,0,0,.5)'; e.currentTarget.style.transform='scale(1)'; }}
+        >{gameOver?'▶':'↺'}</button>
+
+        <div ref={detailsRef}>
+          <button onClick={()=>setShowDetails(v=>!v)} title="Hands, scoring detail & game log" style={{
+            width:42, height:42, borderRadius:'50%',
+            background: showDetails ? 'linear-gradient(135deg,#FFD700,#FF8C00)' : 'rgba(0,0,0,.5)',
+            border: showDetails ? '1px solid #FFD700' : '1px solid rgba(255,215,0,.4)',
+            color: showDetails ? '#1A1A2E' : '#FFD700',
+            fontSize:18, cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center',
+            boxShadow:'0 4px 14px rgba(0,0,0,.4)', transition:'all .2s',
+          }}>📊</button>
+
+        {/* Details panel — hidden by default, opened via the corner icon */}
+        {showDetails && (
+          <div style={{
+            position:'fixed', top:64, right:16, zIndex:99, width:'min(300px, calc(100vw - 32px))', maxHeight:'calc(100vh - 84px)',
+            overflowY:'auto', animation:'panelIn .18s ease-out',
+            background:'rgba(10,26,17,.97)', border:'1px solid rgba(255,215,0,.3)',
+            borderRadius:14, padding:12, boxShadow:'0 10px 34px rgba(0,0,0,.55)',
+            display:'flex', flexDirection:'column', gap:10,
+          }}>
+            {grids.map((g, i) => (
+              <div key={i}>
+                <div style={{color:P_CLR[i],fontSize:10,letterSpacing:1,fontWeight:'bold', marginTop: i>0?8:0}}>PLAYER {i+1} · SCORING DETAIL</div>
+                <LinePanel lines={lines[i]} color={P_CLR[i]} />
+              </div>
+            ))}
+
+            {/* Card legend */}
+            <div style={{
+              background:'rgba(0,0,0,.3)',border:'1px solid rgba(255,255,255,.07)',
+              borderRadius:12,padding:'10px 12px',fontSize:10,
+              color:'#D1D5DB',lineHeight:1.85,width:'100%',
+            }}>
+              <div style={{color:'#9CA3AF',letterSpacing:1,marginBottom:4,fontSize:9}}>HANDS</div>
+              {[['💎','Perfect Trips',200],['👑','Mini Royal',150],['🔥','Straight Flush',100],['🎯','Three of a Kind',60],
+                ['📈','Straight',30],['💧','Flush',25],['✌️','Pair',10],['🃏','High Card',0]].map(([e,n,s])=>(
+                <div key={n} style={{display:'flex',justifyContent:'space-between'}}>
+                  <span style={{color:HAND_CLR[n]||'#9CA3AF'}}>{e} {n}</span>
+                  <span style={{color:'#6B7280'}}>{s>0?`+${s}`:'—'}</span>
+                </div>
+              ))}
+              <div style={{marginTop:6,borderTop:'1px solid rgba(255,255,255,.08)',paddingTop:6}}>
+                <div>🃏 <span style={{color:'#FFD700'}}>WILD</span> — becomes any card you pick</div>
+                <div>⚡ <span style={{color:'#FF6B35'}}>STEAL</span> — steal opponent's card</div>
+              </div>
+            </div>
+
+            {/* Game log — no nested scroll region here; the whole panel above
+                already scrolls as one unit, avoiding overlapping double scrollbars */}
+            <div style={{
+              background:'rgba(0,0,0,.3)',border:'1px solid rgba(255,255,255,.07)',
+              borderRadius:10,padding:'8px 10px',width:'100%',
+            }}>
+              <div style={{color:'#6B7280',fontSize:9,letterSpacing:2,marginBottom:4}}>GAME LOG</div>
+              {log.map(l => (
+                <div key={l.id} style={{color:l.clr,fontSize:11,marginBottom:2,lineHeight:1.4,animation:'in .3s'}}>{l.msg}</div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+
       {/* Title */}
-      <h1 style={{margin:'0 0 4px',fontSize:'clamp(1.4rem,4vw,2.3rem)',color:'#FFD700',
+      <h1 className="app-title" style={{margin:'0 0 4px',fontSize:'clamp(1.3rem,4vw,2.3rem)',color:'#FFD700',
         letterSpacing:4,textShadow:'0 0 28px rgba(255,215,0,.45)',fontStyle:'italic',textAlign:'center'}}>
         ♠ TIC-A-TAC POKER ♠
       </h1>
-      <p style={{color:'#6EAB80',margin:'0 0 14px',fontSize:10,letterSpacing:2,textAlign:'center'}}>
-        LOCAL 1v1 · EACH PLAYER HAS THEIR OWN GRID · SHARED 3-CARD POOL · WILD & STEAL CARDS
+      <p className="app-subtitle" style={{color:'#6EAB80',margin:'0 0 6px',fontSize:10,letterSpacing:2,textAlign:'center'}}>
+        {netMode==='local'
+          ? 'LOCAL 1v1 · EACH PLAYER HAS THEIR OWN GRID · SHARED 5-CARD POOL · WILD & STEAL CARDS'
+          : `ONLINE 1v1 · YOU ARE PLAYER ${myPlayerIdx+1} · ROOM ${roomCode || '—'}`}
       </p>
+      <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:10}}>
+        {netMode !== 'local' && (
+          <span style={{
+            fontSize:10,color: connStatus==='connected' ? '#10B981' : '#FF6B6B',
+            display:'flex',alignItems:'center',gap:4,
+          }}>● {connStatus==='connected' ? 'Connected' : 'Disconnected'}</span>
+        )}
+      </div>
 
-      {/* Status */}
+      {/* Status — hidden during the plain "pick a card" phase; the active
+          player's name pill and grid glow already show whose turn it is.
+          Kept only when it holds an actual control (Joker picker, held card,
+          steal prompt, game over). */}
+      {phase !== 'picking' && (
       <div style={{
         background:'rgba(0,0,0,.45)',
-        border:`1px solid ${isSteal?'rgba(255,107,53,.5)':isRemove?'rgba(212,105,30,.5)':isWild?'rgba(255,215,0,.5)':'rgba(255,215,0,.25)'}`,
+        border:`1px solid ${isSteal?'rgba(255,107,53,.5)':isWild?'rgba(255,215,0,.5)':'rgba(255,215,0,.25)'}`,
         borderRadius:12, padding:'9px 22px', marginBottom:16, textAlign:'center',
-        animation: gameOver ? 'none' : isSteal ? 'stGlow 1.5s infinite' : isRemove ? 'rmGlow 1.5s infinite' : isWild ? 'glow 2s infinite' : 'glow 2s infinite',
-        minWidth:300,
+        animation: gameOver ? 'none' : isSteal ? 'stGlow 1.5s infinite' : isWild ? 'glow 2s infinite' : 'glow 2s infinite',
+        minWidth:'min(300px, 100%)', maxWidth:'94vw',
       }}>
-        <div style={{color:isSteal?'#FF6B35':isRemove?'#D4691E':isWild?'#FFD700':turnClr,fontSize:14,fontWeight:'bold'}}>{phaseMsg}</div>
-        {isWild && (
+        {phase !== 'placing' && (
+          <div style={{color:isSteal?'#FF6B35':isWild?'#FFD700':turnClr,fontSize:14,fontWeight:'bold'}}>{phaseMsg}</div>
+        )}
+        {isWild && !wildSelection && (canIAct ? (
           <div style={{marginTop:12,display:'flex',flexDirection:'column',gap:8}}>
-            <div style={{color:'#9CA3AF',fontSize:11}}>Choose a Symbol:</div>
+            <div style={{color:'#9CA3AF',fontSize:11}}>Step 1 — Choose a Suit:</div>
             <div style={{display:'flex',gap:6,justifyContent:'center',flexWrap:'wrap'}}>
               {[
-                {suit:'♠',color:'#1a1a2e',name:'Spades (Black)'},
+                {suit:'♠',color:'#E5E7EB',name:'Spades (Black)'},
                 {suit:'♥',color:'#C0392B',name:'Hearts (Red)'},
                 {suit:'♦',color:'#C0392B',name:'Diamonds (Red)'},
-                {suit:'♣',color:'#1a1a2e',name:'Clubs (Black)'},
+                {suit:'♣',color:'#E5E7EB',name:'Clubs (Black)'},
               ].map(s=>(
-                <button key={s.suit} onClick={()=>selectWild(s.suit)} style={{
+                <button key={s.suit} onClick={()=>selectWildSuit(s.suit)} style={{
                   padding:'8px 14px',borderRadius:6,border:'2px solid '+s.color+'80',
                   background:s.color+'15',color:s.color,fontSize:15,fontWeight:'bold',
                   cursor:'pointer',transition:'all .2s',title:s.name,
@@ -484,134 +1193,249 @@ export default function TicATacPoker() {
               ))}
             </div>
           </div>
-        )}
-        {held && phase==='placing' && (
-          <div style={{display:'flex',flexDirection:'column',gap:6,marginTop:8}}>
+        ) : (
+          <div style={{marginTop:10,color:'#6B7280',fontSize:11,fontStyle:'italic'}}>⏳ Waiting for opponent…</div>
+        ))}
+        {isWild && wildSelection && canIAct && (
+          <div style={{marginTop:12,display:'flex',flexDirection:'column',gap:8}}>
             <div style={{color:'#9CA3AF',fontSize:11}}>
-              Holding: <span style={{color:'#FFD700'}}>{held.card.wild?'🃏 WILD':held.card.value+held.card.suit}</span> → click your grid
+              Step 2 — Choose a Value for <span style={{color: RED.has(wildSelection.suit)?'#C0392B':'#fff'}}>{wildSelection.suit}</span>:
             </div>
-            <button onClick={unselectCard} style={{
-              padding:'4px 10px',borderRadius:4,border:'1px solid #FFD700',
-              background:'rgba(255,215,0,.1)',color:'#FFD700',fontSize:10,cursor:'pointer',
-              fontFamily:'Georgia,serif',transition:'all .2s',
-            }}
-              onMouseEnter={e=>{ e.currentTarget.style.background='rgba(255,215,0,.2)'; }}
-              onMouseLeave={e=>{ e.currentTarget.style.background='rgba(255,215,0,.1)'; }}
-            >✕ Unselect Card</button>
+            <div style={{display:'flex',gap:5,justifyContent:'center',flexWrap:'wrap',maxWidth:260}}>
+              {VALUES.map(v=>(
+                <button key={v} onClick={()=>selectWildValue(v)} style={{
+                  padding:'6px 9px',borderRadius:6,border:'2px solid rgba(255,215,0,.5)',
+                  background:'rgba(255,215,0,.1)',color:'#FFD700',fontSize:13,fontWeight:'bold',
+                  cursor:'pointer',transition:'all .2s',
+                }}
+                  onMouseEnter={e=>{ e.currentTarget.style.background='rgba(255,215,0,.28)'; }}
+                  onMouseLeave={e=>{ e.currentTarget.style.background='rgba(255,215,0,.1)'; }}
+                >{v}</button>
+              ))}
+            </div>
+            <button onClick={cancelWildSuit} style={{
+              alignSelf:'center',background:'none',border:'none',color:'#6B7280',
+              fontSize:10,cursor:'pointer',textDecoration:'underline',fontFamily:'Georgia,serif',
+            }}>← back to suit</button>
           </div>
         )}
-        <div style={{color:'#6EAB80',fontSize:10,marginTop:2}}>{deck.length} cards left in deck</div>
-      </div>
-
-      <div style={{display:'flex',gap:14,flexWrap:'wrap',justifyContent:'center',alignItems:'flex-start'}}>
-
-        {/* ── P1 Grid + Lines ── */}
-        <div style={{display:'flex',flexDirection:'column',gap:8,alignItems:'center'}}>
-          <PlayerGrid
-            grid={grids[0]} label="PLAYER 1" color={P_CLR[0]}
-            score={scores[0]} isActive={turn===0&&!gameOver}
-            canPlace={phase==='placing'&&turn===0&&!gameOver}
-            stealMode={isSteal&&stealTarget===0}
-            removeMode={isRemove&&turn===0}
-            onPlace={i=>placeCard(i)}
-            onSteal={i=>stealCard(i)}
-            onRemove={i=>removeOwnCard(i)}
-          />
-          <LinePanel lines={lines[0]} color={P_CLR[0]} />
-        </div>
-
-        {/* ── Center Pool + Controls ── */}
-        <div style={{display:'flex',flexDirection:'column',alignItems:'center',gap:12,width:200}}>
-
-          {/* Pool */}
-          <div style={{
-            background:'rgba(0,0,0,.4)',border:'1px solid rgba(255,215,0,.22)',
-            borderRadius:14,padding:'12px 14px',textAlign:'center',width:'100%',
-          }}>
-            <div style={{color:'#9CA3AF',fontSize:10,letterSpacing:2,marginBottom:10}}>
-              CARD POOL · ALWAYS 3
+      {held && phase==='placing' && (
+          <div style={{display:'flex',flexDirection:'column',gap:6}}>
+            <div style={{color:turnClr,fontSize:13,fontWeight:'bold'}}>
+              {turn===0?'Player 1 🔵':'Player 2 🔴'}
             </div>
-            <div style={{display:'flex',gap:10,justifyContent:'center'}}>
-              {pool.map((card,i) => (
-                <div key={card?card.id:`slot-${i}`} style={{animation:card?'pop .3s ease-out':'none'}}>
-                  {card
-                    ? <CardEl card={card} size='lg'
-                        glowing={phase==='picking'}
-                        selected={held?.poolIdx===i}
-                        dimmed={held!=null && held.poolIdx!==i && phase!=='picking'}
-                        onClick={phase==='picking' ? ()=>pickCard(i) : undefined}
-                      />
-                    : <div style={{width:74,height:104,borderRadius:7,
-                        border:'2px dashed rgba(255,255,255,.1)',
-                        background:'rgba(255,255,255,.03)',
-                        display:'flex',alignItems:'center',justifyContent:'center'}}>
-                        <span style={{color:'rgba(255,255,255,.12)',fontSize:20}}>—</span>
-                      </div>
-                  }
+            {canIAct ? (
+              <>
+                <div style={{color:'#9CA3AF',fontSize:11}}>
+                  Holding: <span style={{color:'#FFD700'}}>{held.card.value+held.card.suit}</span>{held.card.fromWild && <span style={{color:'#6B7280'}}> (from 🃏)</span>} → click your grid
+                </div>
+                {held.fromSteal
+                  ? <div style={{color:'#6B7280',fontSize:9,fontStyle:'italic'}}>Stolen card — must be placed</div>
+                  : <button onClick={unselectCard} style={{
+                      padding:'4px 10px',borderRadius:4,border:'1px solid #FFD700',
+                      background:'rgba(255,215,0,.1)',color:'#FFD700',fontSize:10,cursor:'pointer',
+                      fontFamily:'Georgia,serif',transition:'all .2s',
+                    }}
+                      onMouseEnter={e=>{ e.currentTarget.style.background='rgba(255,215,0,.2)'; }}
+                      onMouseLeave={e=>{ e.currentTarget.style.background='rgba(255,215,0,.1)'; }}
+                    >✕ Unselect Card</button>
+                }
+              </>
+            ) : (
+              <div style={{color:'#6B7280',fontSize:11,fontStyle:'italic'}}>⏳ Opponent is placing their card…</div>
+            )}
+          </div>
+        )}
+      </div>
+      )}
+
+      {/* Grid Switcher Tabs (Mobile or Team Switcher) */}
+      {!gameOver && netScreen === 'playing' && (
+        <div style={{
+          display:'flex', gap:8, marginBottom:16, width: isMobile ? 'min(360px, 94vw)' : '320px',
+          background:'rgba(0,0,0,.3)', padding:4, borderRadius:12,
+          border:'1px solid rgba(255,255,255,.1)',
+        }}>
+          {gameMode === '1v1' ? (
+            isMobile && [0,1].map(p => (
+              <button key={p} onClick={() => setViewedPlayer(p)} style={{
+                flex:1, padding:'9px 0', borderRadius:8, border:'none',
+                background: viewedPlayer === p ? 'rgba(255,215,0,.15)' : 'transparent',
+                color: viewedPlayer === p ? '#FFD700' : '#9CA3AF',
+                fontSize:11, fontWeight:'bold', cursor:'pointer',
+                transition:'all .2s', display:'flex', alignItems:'center', justifyContent:'center', gap:6
+              }}>
+                P{p+1}
+                {turn === p && <span style={{width:6,height:6,borderRadius:'50%',background:P_CLR[p],boxShadow:`0 0 6px ${P_CLR[p]}`}}/>}
+              </button>
+            ))
+          ) : gameMode === '1v1v1' ? (
+            [0,1,2].map(p => (
+              <button key={p} onClick={() => setViewedPlayer(p)} style={{
+                flex:1, padding:'9px 0', borderRadius:8, border:'none',
+                background: viewedPlayer === p ? 'rgba(255,215,0,.15)' : 'transparent',
+                color: viewedPlayer === p ? '#FFD700' : '#9CA3AF',
+                fontSize:10, fontWeight:'bold', cursor:'pointer',
+                transition:'all .2s', display:'flex', alignItems:'center', justifyContent:'center', gap:4
+              }}>
+                P{p+1}
+                {turn === p && <span style={{width:5,height:5,borderRadius:'50%',background:P_CLR[p],boxShadow:`0 0 6px ${P_CLR[p]}`}}/>}
+              </button>
+            ))
+          ) : (
+            // 2v2 Mode
+            isMobile ? (
+              [0,1,2,3].map(p => (
+                <button key={p} onClick={() => setViewedPlayer(p)} style={{
+                  flex:1, padding:'9px 0', borderRadius:8, border:'none',
+                  background: viewedPlayer === p ? 'rgba(255,215,0,.15)' : 'transparent',
+                  color: viewedPlayer === p ? '#FFD700' : '#9CA3AF',
+                  fontSize:9, fontWeight:'bold', cursor:'pointer',
+                  transition:'all .2s', display:'flex', alignItems:'center', justifyContent:'center', gap:3
+                }}>
+                  P{p+1}
+                  {turn === p && <span style={{width:5,height:5,borderRadius:'50%',background:P_CLR[p],boxShadow:`0 0 6px ${P_CLR[p]}`}}/>}
+                </button>
+              ))
+            ) : (
+              [0,1].map(t => (
+                <button key={t} onClick={() => setViewedPlayer(t)} style={{
+                  flex:1, padding:'9px 0', borderRadius:8, border:'none',
+                  background: (viewedPlayer%2) === t ? 'rgba(255,215,0,.15)' : 'transparent',
+                  color: (viewedPlayer%2) === t ? '#FFD700' : '#9CA3AF',
+                  fontSize:11, fontWeight:'bold', cursor:'pointer',
+                  transition:'all .2s', display:'flex', alignItems:'center', justifyContent:'center', gap:6
+                }}>
+                  {t === 0 ? 'Team A (P1+P3)' : 'Team B (P2+P4)'}
+                  {(turn%2) === t && <span style={{width:6,height:6,borderRadius:'50%',background:TEAM_CLR[t],boxShadow:`0 0 6px ${TEAM_CLR[t]}`}}/>}
+                </button>
+              ))
+            )
+          )}
+        </div>
+      )}
+
+      {netScreen === 'lobby' && (
+        <div style={{display:'flex',flexDirection:'column',gap:16,width:'100%',maxWidth:380,alignItems:'center'}}>
+          <div style={{background:'rgba(0,0,0,.4)', border:'2px solid rgba(255,215,0,.3)', borderRadius:16, padding:16, width:'100%'}}>
+            <div style={{color:'#9CA3AF', fontSize:11, letterSpacing:2, marginBottom:12}}>GAME LOBBY · {gameMode} MODE</div>
+            <div style={{display:'flex', flexDirection:'column', gap:8}}>
+              {players.map(p => (
+                <div key={p.id} style={{display:'flex', justifyContent:'space-between', alignItems:'center', background:'rgba(255,255,255,.05)', padding:'8px 12px', borderRadius:10}}>
+                  <span style={{color:P_CLR[p.idx], fontWeight:'bold', fontSize:14}}>{p.name} {p.idx === myPlayerIdx && '(YOU)'}</span>
+                  <span style={{fontSize:10, color:'#6EAB80'}}>● Ready</span>
+                </div>
+              ))}
+              {Array.from({length: (gameMode==='2v2'?4:gameMode==='1v1v1'?3:2) - players.length}).map((_, i) => (
+                <div key={i} style={{display:'flex', justifyContent:'space-between', alignItems:'center', background:'rgba(0,0,0,.2)', padding:'8px 12px', borderRadius:10, border:'1px dashed rgba(255,255,255,.1)'}}>
+                  <span style={{color:'#6B7280', fontSize:13}}>Waiting for player…</span>
                 </div>
               ))}
             </div>
           </div>
+          {netMode === 'host' ? (
+            <button onClick={() => {
+              connsRef.current.forEach(c => c.send({ type: 'start' }));
+              setNetScreen('playing');
+              startGame();
+            }} style={{
+              padding:'16px 0',borderRadius:12,border:'none', width:'100%',
+              background:'linear-gradient(135deg,#FFD700,#FF8C00)',color:'#1A1A2E',fontSize:15,fontWeight:'bold',
+              cursor:'pointer',fontFamily:'Georgia,serif',
+            }}>🚀 Start Game</button>
+          ) : (
+            <p style={{color:'#6EAB80',fontSize:12,animation:'glow 2s infinite'}}>⏳ Waiting for host to start…</p>
+          )}
+          <button onClick={leaveGame} style={{
+            background:'none',border:'1px solid rgba(255,255,255,.2)',borderRadius:8,
+            padding:'8px 20px',color:'#9CA3AF',fontSize:12,cursor:'pointer',fontFamily:'Georgia,serif',
+          }}>← Leave</button>
+        </div>
+      )}
 
-          {/* Restart */}
-          <button onClick={startGame} style={{
-            background:'linear-gradient(135deg,#FFD700,#FF8C00)',border:'none',
-            borderRadius:10,padding:'10px 0',width:'100%',
-            color:'#1A1A2E',fontWeight:'bold',fontSize:13,cursor:'pointer',
-            letterSpacing:1,fontFamily:'Georgia,serif',
-            boxShadow:'0 4px 18px rgba(255,215,0,.3)',transition:'transform .1s',
-          }}
-            onMouseEnter={e=>e.currentTarget.style.transform='scale(1.02)'}
-            onMouseLeave={e=>e.currentTarget.style.transform=''}
-          >{gameOver?'▶ New Game':'↺ Restart'}</button>
+      <div className="board-3col" style={{ gap: gameMode==='1v1v1' ? 8 : 14, flexDirection: isMobile ? 'column' : 'row' }}>
 
-          {/* Card legend */}
-          <div style={{
-            background:'rgba(0,0,0,.3)',border:'1px solid rgba(255,255,255,.07)',
-            borderRadius:12,padding:'10px 12px',fontSize:10,
-            color:'#D1D5DB',lineHeight:1.85,width:'100%',
-          }}>
-            <div style={{color:'#9CA3AF',letterSpacing:1,marginBottom:4,fontSize:9}}>HANDS</div>
-            {[['👑','Mini Royal',150],['🔥','Straight Flush',100],['🎯','Three of a Kind',60],
-              ['📈','Straight',30],['💧','Flush',25],['✌️','Pair',10],['🃏','High Card',0]].map(([e,n,s])=>(
-              <div key={n} style={{display:'flex',justifyContent:'space-between'}}>
-                <span style={{color:HAND_CLR[n]||'#9CA3AF'}}>{e} {n}</span>
-                <span style={{color:'#6B7280'}}>{s>0?`+${s}`:'—'}</span>
+        {/* ── All Grids Logic ── */}
+        {grids.map((g, i) => {
+          // Visibility Logic
+          let isVisible = false;
+          if (isMobile) {
+            isVisible = (viewedPlayer === i);
+          } else {
+            if (gameMode === '1v1') isVisible = true;
+            else if (gameMode === '1v1v1') isVisible = true; // SHOW ALL 3 on Fold/Wide
+            else if (gameMode === '2v2') {
+              isVisible = (i % 2 === viewedPlayer % 2); // Show Teammates
+            }
+          }
+
+          if (!isVisible) return null;
+
+          return (
+            <React.Fragment key={i}>
+              <div style={{display:'flex',flexDirection:'column',gap:8,alignItems:'center',animation:'in .3s'}}>
+                <PlayerGrid
+                  grid={grids[i]} label={`P${i+1}${netMode!=='local'&&myPlayerIdx===i?' (YOU)':''}`} color={P_CLR[i]}
+                  score={scores[i]} isActive={turn===i&&!gameOver}
+                  canPlace={phase==='placing'&&turn===i&&!gameOver&&canIAct}
+                  stealMode={isSteal && (gameMode==='2v2' ? (i%2 !== turn%2) : (i !== turn)) && canIAct}
+                  onPlace={idx=>placeCard(idx)}
+                  onSteal={idx=>stealCard(idx, i)}
+                />
               </div>
-            ))}
-            <div style={{marginTop:6,borderTop:'1px solid rgba(255,255,255,.08)',paddingTop:6}}>
-              <div>🃏 <span style={{color:'#FFD700'}}>WILD</span> — acts as best card</div>
-              <div>⚡ <span style={{color:'#FF6B35'}}>STEAL</span> — steal opponent's card</div>
-              <div>🗑 <span style={{color:'#D4691E'}}>REMOVE</span> — delete your own card</div>
+
+              {/* Insert Pool in the Middle on Wide Screens */}
+              {!isMobile && (
+                (gameMode === '1v1' && i === 0) ||
+                (gameMode === '1v1v1' && i === 1) ||
+                (gameMode === '2v2' && i % 2 === 0 && i < 2)
+              ) && (
+                <div style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:8, width:'auto' }}>
+                  <div style={{
+                    background:'rgba(0,0,0,.4)', border:'1px solid rgba(255,215,0,.22)',
+                    borderRadius:14, padding:'10px 10px', textAlign:'center', width:'100%',
+                    display:'flex', flexDirection:'column', alignItems:'center', gap:6
+                  }}>
+                    <div style={{ color:'#9CA3AF', fontSize:9, letterSpacing:1, opacity:0.8 }}>POOL ({deck.length})</div>
+                    <div style={{ display:'flex', flexDirection:'column', gap:'clamp(3px,1.2vw,6px)', justifyContent:'center', alignItems:'center' }}>
+                      {pool.map((card, idx) => (
+                        <div key={card ? card.id : `slot-${idx}`} style={{ animation: card ? 'pop .3s ease-out' : 'none' }}>
+                          {card
+                            ? <CardEl card={card} size='md' glowing={phase==='picking'} selected={held?.poolIdx===idx} dimmed={held!=null && held.poolIdx!==idx && phase!=='picking'} onClick={phase==='picking'&&canIAct ? ()=>pickCard(idx) : undefined} />
+                            : <div style={{ width:'clamp(36px,11.5vw,58px)', aspectRatio:'0.712', borderRadius:10, border:'2px dashed rgba(255,255,255,.1)', background:'rgba(255,255,255,.03)', display:'flex', alignItems:'center', justifyContent:'center' }}><span style={{color:'rgba(255,255,255,.12)',fontSize:20}}>—</span></div>
+                          }
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </React.Fragment>
+          );
+        })}
+
+        {/* Center Pool for Mobile (Vertical stacking) */}
+        {isMobile && (
+          <div style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:8, width:'min(420px,94vw)' }}>
+            <div style={{
+              background:'rgba(0,0,0,.4)', border:'1px solid rgba(255,215,0,.22)',
+              borderRadius:14, padding:'10px 8px', textAlign:'center', width:'100%',
+              display:'flex', flexDirection:'column', alignItems:'center', gap:6
+            }}>
+              <div style={{ color:'#9CA3AF', fontSize:9, letterSpacing:1, opacity:0.8 }}>POOL ({deck.length})</div>
+              <div style={{ display:'flex', flexDirection:'row', gap:'clamp(3px,1.2vw,6px)', justifyContent:'center', alignItems:'center' }}>
+                {pool.map((card, idx) => (
+                  <div key={card ? card.id : `slot-${idx}`} style={{ animation: card ? 'pop .3s ease-out' : 'none' }}>
+                    {card
+                      ? <CardEl card={card} size='lg' glowing={phase==='picking'} selected={held?.poolIdx===idx} dimmed={held!=null && held.poolIdx!==idx && phase!=='picking'} onClick={phase==='picking'&&canIAct ? ()=>pickCard(idx) : undefined} />
+                      : <div style={{ width:'clamp(40px,13vw,66px)', aspectRatio:'0.712', borderRadius:10, border:'2px dashed rgba(255,255,255,.1)', background:'rgba(255,255,255,.03)', display:'flex', alignItems:'center', justifyContent:'center' }}><span style={{color:'rgba(255,255,255,.12)',fontSize:20}}>—</span></div>
+                    }
+                  </div>
+                ))}
+              </div>
             </div>
           </div>
-
-          {/* Game log */}
-          <div style={{
-            background:'rgba(0,0,0,.3)',border:'1px solid rgba(255,255,255,.07)',
-            borderRadius:10,padding:'8px 10px',width:'100%',maxHeight:160,overflowY:'auto',
-          }}>
-            <div style={{color:'#6B7280',fontSize:9,letterSpacing:2,marginBottom:4}}>GAME LOG</div>
-            {log.map(l => (
-              <div key={l.id} style={{color:l.clr,fontSize:11,marginBottom:2,lineHeight:1.4,animation:'in .3s'}}>{l.msg}</div>
-            ))}
-          </div>
-        </div>
-
-        {/* ── P2 Grid + Lines ── */}
-        <div style={{display:'flex',flexDirection:'column',gap:8,alignItems:'center'}}>
-          <PlayerGrid
-            grid={grids[1]} label="PLAYER 2" color={P_CLR[1]}
-            score={scores[1]} isActive={turn===1&&!gameOver}
-            canPlace={phase==='placing'&&turn===1&&!gameOver}
-            stealMode={isSteal&&stealTarget===1}
-            removeMode={isRemove&&turn===1}
-            onPlace={i=>placeCard(i)}
-            onSteal={i=>stealCard(i)}
-            onRemove={i=>removeOwnCard(i)}
-          />
-          <LinePanel lines={lines[1]} color={P_CLR[1]} />
-        </div>
+        )}
       </div>
 
       {/* Game Over */}
@@ -619,26 +1443,55 @@ export default function TicATacPoker() {
         <div style={{
           marginTop:24,background:'rgba(0,0,0,.55)',
           border:'2px solid rgba(255,215,0,.4)',borderRadius:20,
-          padding:'22px 50px',textAlign:'center',animation:'in .5s',
+          padding:'22px 30px',textAlign:'center',animation:'in .5s',
+          width: 'min(500px, 94vw)'
         }}>
           <div style={{color:'#9CA3AF',fontSize:11,letterSpacing:3,marginBottom:14}}>FINAL SCORES</div>
-          <div style={{display:'flex',gap:52,justifyContent:'center',alignItems:'center'}}>
-            {[0,1].map(p => {
-              const g = grade(finalSc[p]);
-              return (
-                <div key={p} style={{textAlign:'center'}}>
-                  <div style={{color:P_CLR[p],fontSize:12,fontWeight:'bold',marginBottom:4}}>
-                    {p===0?'PLAYER 1 🔵':'PLAYER 2 🔴'}
+          <div style={{display:'flex',gap:12,justifyContent:'center',alignItems:'flex-start',flexWrap:'wrap'}}>
+            {gameMode === '1v1' || gameMode === '1v1v1' ? (
+              [0,1,2].map(p => {
+                if (gameMode==='1v1' && p>1) return null;
+                const g = grade(finalSc[p]);
+                return (
+                  <div key={p} style={{textAlign:'center', minWidth:80, padding:8, background:'rgba(255,255,255,.05)', borderRadius:12}}>
+                    <div style={{color:P_CLR[p],fontSize:12,fontWeight:'bold',marginBottom:4}}>P{p+1}</div>
+                    <div style={{color:gClr[g]||'#6B7280',fontSize:44,fontWeight:'bold',lineHeight:1}}>{g}</div>
+                    <div style={{color:'#FFD700',fontSize:24,fontWeight:'bold'}}>{finalSc[p]}</div>
                   </div>
-                  <div style={{color:gClr[g]||'#6B7280',fontSize:56,fontWeight:'bold',lineHeight:1}}>{g}</div>
-                  <div style={{color:'#FFD700',fontSize:32,fontWeight:'bold'}}>{finalSc[p]}</div>
-                  <div style={{color:'#9CA3AF',fontSize:11}}>pts</div>
+                );
+              })
+            ) : (
+              <>
+                <div style={{textAlign:'center', border:'1px solid rgba(75,158,255,.3)', padding:8, borderRadius:12}}>
+                  <div style={{color:TEAM_CLR[0],fontSize:12,fontWeight:'bold',marginBottom:4}}>TEAM A</div>
+                  <div style={{color:'#FFD700',fontSize:32,fontWeight:'bold'}}>{finalSc[0] + finalSc[2]}</div>
+                  <div style={{display:'flex', gap:10, fontSize:10, color:'#9CA3AF', marginTop:4}}>
+                    <span>P1: {finalSc[0]}</span>
+                    <span>P3: {finalSc[2]}</span>
+                  </div>
                 </div>
-              );
-            })}
+                <div style={{fontSize:24, color:'#6B7280', alignSelf:'center'}}>vs</div>
+                <div style={{textAlign:'center', border:'1px solid rgba(255,95,95,.3)', padding:8, borderRadius:12}}>
+                  <div style={{color:TEAM_CLR[1],fontSize:12,fontWeight:'bold',marginBottom:4}}>TEAM B</div>
+                  <div style={{color:'#FFD700',fontSize:32,fontWeight:'bold'}}>{finalSc[1] + finalSc[3]}</div>
+                  <div style={{display:'flex', gap:10, fontSize:10, color:'#9CA3AF', marginTop:4}}>
+                    <span>P2: {finalSc[1]}</span>
+                    <span>P4: {finalSc[3]}</span>
+                  </div>
+                </div>
+              </>
+            )}
           </div>
           <div style={{marginTop:16,fontSize:22,color:'#FFD700',fontWeight:'bold'}}>
-            {finalSc[0]>finalSc[1]?'🏆 Player 1 Wins!':finalSc[1]>finalSc[0]?'🏆 Player 2 Wins!':'🤝 Tie Game!'}
+            {gameMode === '1v1' ? (
+               finalSc[0]>finalSc[1]?'🏆 Player 1 Wins!':finalSc[1]>finalSc[0]?'🏆 Player 2 Wins!':'🤝 Tie Game!'
+            ) : gameMode === '1v1v1' ? (
+               finalSc[0]>finalSc[1] && finalSc[0]>finalSc[2] ? '🏆 Player 1 Wins!' :
+               finalSc[1]>finalSc[0] && finalSc[1]>finalSc[2] ? '🏆 Player 2 Wins!' :
+               finalSc[2]>finalSc[0] && finalSc[2]>finalSc[1] ? '🏆 Player 3 Wins!' : '🤝 Tie Game!'
+            ) : (
+               (finalSc[0]+finalSc[2]) > (finalSc[1]+finalSc[3]) ? '🏆 Team A Wins!' : (finalSc[1]+finalSc[3]) > (finalSc[0]+finalSc[2]) ? '🏆 Team B Wins!' : '🤝 Tie Game!'
+            )}
           </div>
           <button onClick={startGame} style={{
             marginTop:16,background:'linear-gradient(135deg,#FFD700,#FF8C00)',
@@ -646,8 +1499,48 @@ export default function TicATacPoker() {
             color:'#1A1A2E',fontWeight:'bold',fontSize:15,cursor:'pointer',
             fontFamily:'Georgia,serif',letterSpacing:1,
           }}>▶ Play Again</button>
+          {netScreen === 'lobby' && (
+            <div style={{display:'flex',flexDirection:'column',gap:16,width:'100%',alignItems:'center'}}>
+              <div style={{background:'rgba(0,0,0,.4)', border:'2px solid rgba(255,215,0,.3)', borderRadius:16, padding:16, width:'100%'}}>
+                <div style={{color:'#9CA3AF', fontSize:11, letterSpacing:2, marginBottom:12}}>GAME LOBBY · {gameMode} MODE</div>
+                <div style={{display:'flex', flexDirection:'column', gap:8}}>
+                  {players.map(p => (
+                    <div key={p.id} style={{display:'flex', justifyContent:'space-between', alignItems:'center', background:'rgba(255,255,255,.05)', padding:'8px 12px', borderRadius:10}}>
+                      <span style={{color:P_CLR[p.idx], fontWeight:'bold', fontSize:14}}>{p.name} {p.idx === myPlayerIdx && '(YOU)'}</span>
+                      <span style={{fontSize:10, color:'#6EAB80'}}>● Ready</span>
+                    </div>
+                  ))}
+                  {Array.from({length: (gameMode==='2v2'?4:gameMode==='1v1v1'?3:2) - players.length}).map((_, i) => (
+                    <div key={i} style={{display:'flex', justifyContent:'space-between', alignItems:'center', background:'rgba(0,0,0,.2)', padding:'8px 12px', borderRadius:10, border:'1px dashed rgba(255,255,255,.1)'}}>
+                      <span style={{color:'#6B7280', fontSize:13}}>Waiting for player…</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {netMode === 'host' ? (
+                <button onClick={() => {
+                  connsRef.current.forEach(c => c.send({ type: 'start' }));
+                  setNetScreen('playing');
+                  startGame();
+                }} style={{
+                  padding:'16px 0',borderRadius:12,border:'none', width:'100%',
+                  background:'linear-gradient(135deg,#FFD700,#FF8C00)',color:'#1A1A2E',fontSize:15,fontWeight:'bold',
+                  cursor:'pointer',fontFamily:'Georgia,serif',
+                }}>🚀 Start Game</button>
+              ) : (
+                <p style={{color:'#6EAB80',fontSize:12,animation:'glow 2s infinite'}}>⏳ Waiting for host to start…</p>
+              )}
+
+              <button onClick={leaveGame} style={{
+                background:'none',border:'1px solid rgba(255,255,255,.2)',borderRadius:8,
+                padding:'8px 20px',color:'#9CA3AF',fontSize:12,cursor:'pointer',fontFamily:'Georgia,serif',
+              }}>← Leave</button>
+            </div>
+          )}
         </div>
       )}
+      </>)}
     </div>
   );
 }
