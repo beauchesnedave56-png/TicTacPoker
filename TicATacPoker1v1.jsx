@@ -1,4 +1,5 @@
 import React, { Fragment, useState, useEffect, useCallback, useRef } from "react";
+import { Preferences } from "@capacitor/preferences";
 import Peer from "peerjs";
 import QRCode from "qrcode";
 
@@ -174,7 +175,7 @@ function sanitizeProfileName(name, fallback = '') {
   return value.slice(0, 24);
 }
 
-function readJsonStorage(key, fallback) {
+function readJsonStorageSync(key, fallback) {
   try {
     if (typeof window === 'undefined' || !window.localStorage) return fallback;
     const raw = window.localStorage.getItem(key);
@@ -184,7 +185,25 @@ function readJsonStorage(key, fallback) {
   }
 }
 
-function writeJsonStorage(key, value) {
+async function readJsonStorage(key, fallback) {
+  try {
+    const result = await Preferences.get({ key });
+    if (result && result.value !== null && result.value !== undefined) {
+      return JSON.parse(result.value);
+    }
+  } catch {
+    // Fall back to localStorage when Preferences is unavailable or the native
+    // storage cannot be read yet.
+  }
+  return readJsonStorageSync(key, fallback);
+}
+
+async function writeJsonStorage(key, value) {
+  try {
+    await Preferences.set({ key, value: JSON.stringify(value) });
+  } catch {
+    // Ignore native storage errors and fall back to browser storage below.
+  }
   try {
     if (typeof window === 'undefined' || !window.localStorage) return;
     window.localStorage.setItem(key, JSON.stringify(value));
@@ -195,7 +214,7 @@ function writeJsonStorage(key, value) {
 
 function loadStoredProfile() {
   const fallback = { id: createGuid(), displayName: 'Player 1', createdAt: new Date().toISOString() };
-  const stored = readJsonStorage(PROFILE_STORAGE_KEY, null);
+  const stored = readJsonStorageSync(PROFILE_STORAGE_KEY, null);
   if (!stored || typeof stored !== 'object') return fallback;
   return {
     id: typeof stored.id === 'string' && stored.id ? stored.id : createGuid(),
@@ -205,7 +224,7 @@ function loadStoredProfile() {
 }
 
 function loadStoredHistory() {
-  const stored = readJsonStorage(HISTORY_STORAGE_KEY, []);
+  const stored = readJsonStorageSync(HISTORY_STORAGE_KEY, []);
   return Array.isArray(stored) ? stored : [];
 }
 
@@ -479,47 +498,46 @@ export default function TicATacPoker() {
     return () => m.removeEventListener("change", onChange);
   }, []);
 
-  // Auto-switch viewed grid or team (Phone needs it for 1v1/2v2, Fold needs it for 2v2)
+  // Local / team-view switching is immediate and can react to steal phase changes.
+  // For 1v1 mobile, the board flip must be tied to the actual turn change so the
+  // opponent's placement animation has time to read before the view changes.
   useEffect(() => {
     if (gameOver) return;
-    if (focusDelayRef.current) {
-      clearTimeout(focusDelayRef.current);
-      focusDelayRef.current = null;
-    }
-
-    const needsSwitch = isMobile || gameMode === '2v2';
-    if (!needsSwitch) return;
 
     if (netMode === 'local') {
-      if (phase === 'steal') {
-        setViewedPlayer((turn + 1) % grids.length);
-      } else {
-        setViewedPlayer(turn);
-      }
+      setViewedPlayer(phase === 'steal' ? (turn + 1) % grids.length : turn);
       return;
     }
 
-    // Online 1v1 on mobile: keep the active player's board in view, with a longer
-    // delay when it's the opponent's turn so their placement animation can finish.
-    if (gameMode === '1v1' && isMobile) {
-      const target = turn;
-      const delay = turn === myPlayerIdx ? 0 : 1000;
-      focusDelayRef.current = setTimeout(() => setViewedPlayer(target), delay);
-      return () => {
-        if (focusDelayRef.current) {
-          clearTimeout(focusDelayRef.current);
-          focusDelayRef.current = null;
-        }
-      };
-    }
+    const needsSwitch = isMobile || gameMode === '2v2';
+    if (!needsSwitch || (gameMode === '1v1' && isMobile)) return;
 
     if (turn === myPlayerIdx && phase === 'steal') {
       setViewedPlayer((turn + 1) % grids.length);
     } else {
       setViewedPlayer(myPlayerIdx);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [turn, phase, netMode, gameOver, isMobile, gameMode, myPlayerIdx, grids.length]);
+
+  useEffect(() => {
+    if (gameOver || !isMobile || gameMode !== '1v1' || netMode === 'local') return;
+
+    if (focusDelayRef.current) {
+      clearTimeout(focusDelayRef.current);
+      focusDelayRef.current = null;
+    }
+
+    const target = turn;
+    const delay = turn === myPlayerIdx ? 0 : 1200;
+    focusDelayRef.current = setTimeout(() => setViewedPlayer(target), delay);
+
+    return () => {
+      if (focusDelayRef.current) {
+        clearTimeout(focusDelayRef.current);
+        focusDelayRef.current = null;
+      }
+    };
+  }, [turn, isMobile, gameMode, netMode, myPlayerIdx, gameOver]);
 
   // ── Envoyer l'état complet à l'adversaire (hôte uniquement, source de vérité) ──
   const broadcastState = useCallback((overrides={}) => {
@@ -792,6 +810,10 @@ export default function TicATacPoker() {
     return () => document.removeEventListener('mousedown', handleOutside);
   }, [showDetails]);
 
+  useEffect(() => {
+    void writeJsonStorage(PROFILE_STORAGE_KEY, profile);
+  }, [profile]);
+
   const addLog = useCallback((msg, clr='#D1D5DB') => {
     setLog(p => [{msg,clr,id:Date.now()+Math.random()}, ...p].slice(0,50));
   },[]);
@@ -829,14 +851,14 @@ export default function TicATacPoker() {
   }, [profile.displayName]);
 
   useEffect(() => {
-    writeJsonStorage(HISTORY_STORAGE_KEY, history);
+    void writeJsonStorage(HISTORY_STORAGE_KEY, history);
   }, [history]);
 
   const saveProfile = () => {
     const nextName = sanitizeProfileName(draftName, '');
     const nextProfile = { ...profile, displayName: nextName, updatedAt: new Date().toISOString() };
     setProfile(nextProfile);
-    writeJsonStorage(PROFILE_STORAGE_KEY, nextProfile);
+    void writeJsonStorage(PROFILE_STORAGE_KEY, nextProfile);
 
     if (netMode === 'guest' && connsRef.current[0]?.open) {
       connsRef.current[0].send({ type: 'player-profile', payload: { name: nextName || 'Player 1', id: nextProfile.id } });

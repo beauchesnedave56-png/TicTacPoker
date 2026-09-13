@@ -13,3 +13,5 @@ GitHub Action de release APK :
 - Le QR code pointe vers `https://github.com/beauchesnedave56-png/TicTacPoker/releases/latest/download/TicTacPoker.apk`.
 - Pour lancer la publication manuellement : Actions → Android APK Release → Run workflow, puis saisir le tag (ex. `v1.0.0`).
 - Pour un tag push, il suffit de créer un tag `v*.*.*` et le workflow publie l'APK automatiquement.
+- Les données de profil et d'historique sont stockées via Capacitor Preferences (avec repli sur `localStorage` dans le navigateur), ce qui les rend plus fiables sur Android et plus compatibles avec la persistance native des apps installées.
+- Important pour les mises à jour Android : utilise le même `appId` et la même clé de signature pour chaque APK de release ; sinon Android refuse l'installation avec un conflit de package.
