@@ -1,5 +1,6 @@
 import React, { Fragment, useState, useEffect, useCallback, useRef } from "react";
 import Peer from "peerjs";
+import QRCode from "qrcode";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const SUITS  = ['♠','♥','♦','♣'];
@@ -9,6 +10,7 @@ const RED    = new Set(['♥','♦']);
 const P_CLR  = ['#4B9EFF','#FF5F5F','#A855F7','#FFAD60']; // P1 (Blue), P2 (Red), P3 (Purple), P4 (Orange)
 const TEAM_CLR = ['#4B9EFF', '#FF5F5F'];
 const ROOM_PREFIX = 'tatp-'; // namespace so we don't collide with other apps on the public PeerJS broker
+const APP_DOWNLOAD_URL = import.meta.env.VITE_APK_DOWNLOAD_URL || 'https://github.com/beauchesnedave56-png/TicTacPoker/releases/latest/download/TicTacPoker.apk';
 
 // Court code, lisible à l'oral/à l'écrit — évite les caractères ambigus (0/O, 1/I/L)
 function makeRoomCode() {
@@ -407,7 +409,7 @@ function LinePanel({ lines, color }) {
 // ─── Main ─────────────────────────────────────────────────────────────────────
 export default function TicATacPoker() {
   // ── Réseau : écran de menu, hôte/invité, code de partie ──
-  const [netScreen, setNetScreen] = useState('menu'); // menu | hosting | joining | playing
+  const [netScreen, setNetScreen] = useState('menu'); // menu | qr | hosting | joining | playing
   const [netMode,   setNetMode]   = useState('local'); // local | host | guest
   const [gameMode,  setGameMode]  = useState('1v1');   // 1v1 | 2v2
   const [profile,   setProfile]   = useState(() => loadStoredProfile());
@@ -420,6 +422,7 @@ export default function TicATacPoker() {
   const peerRef = useRef(null);
   const connsRef = useRef([]); // Multiple connections for the host
   const [players,   setPlayers]   = useState([]); // { id, name, idx }
+  const [qrCodeUrl, setQrCodeUrl] = useState('');
   const liveRef = useRef({}); // toujours à jour après chaque rendu ; lu par les callbacks PeerJS pour éviter les closures périmées
   const [myPlayerIdx, setMyPlayerIdx] = useState(0); // assigned by host
 
@@ -643,6 +646,34 @@ export default function TicATacPoker() {
       }
     });
   };
+
+  const qrShareUrl = roomCode
+    ? `${typeof window !== 'undefined' && window.location ? window.location.origin : ''}?join=${encodeURIComponent(roomCode)}`
+    : APP_DOWNLOAD_URL;
+
+  useEffect(() => {
+    const joinCodeFromUrl = new URLSearchParams(window.location.search).get('join');
+    if (joinCodeFromUrl) {
+      setJoinInput(joinCodeFromUrl);
+      startJoining(joinCodeFromUrl);
+    }
+  }, []);
+
+  useEffect(() => {
+    const target = qrShareUrl || APP_DOWNLOAD_URL;
+    if (!target) {
+      setQrCodeUrl('');
+      return;
+    }
+    QRCode.toDataURL(target, {
+      width: 150,
+      margin: 1,
+      color: { dark: '#0F172A', light: '#F8FAFC' },
+      type: 'image/png',
+    })
+      .then(dataUrl => setQrCodeUrl(dataUrl))
+      .catch(() => setQrCodeUrl(''));
+  }, [qrShareUrl]);
 
   const leaveGame = () => {
     connsRef.current.forEach(c => c.close());
@@ -1046,6 +1077,13 @@ export default function TicATacPoker() {
                 background:'rgba(75,158,255,.1)',color:'#4B9EFF',fontSize:15,fontWeight:'bold',
                 cursor:'pointer',fontFamily:'Georgia,serif',
               }}>🔗 Join Online Game</button>
+              <button onClick={() => setNetScreen('qr')} style={{
+                padding:'10px 12px', borderRadius:10, border:'1px solid rgba(255,255,255,.12)',
+                background:'rgba(255,255,255,.03)', color:'#FFD700', fontSize:11, fontWeight:'bold',
+                cursor:'pointer', fontFamily:'Georgia,serif',
+              }}>
+                {roomCode ? 'Show join QR code' : 'Install / Join via QR'}
+              </button>
               <button onClick={() => setNetScreen('history')} style={{
                 padding:'10px 12px', borderRadius:10, border:'1px solid rgba(255,255,255,.12)',
                 background:'rgba(255,255,255,.03)', color:'#FFD700', fontSize:11, fontWeight:'bold',
@@ -1057,6 +1095,38 @@ export default function TicATacPoker() {
               <p style={{color:'#6EAB80',fontSize:11,marginTop:8}}>
                 Online play needs a brief internet connection to pair the two devices, then the game runs directly between you.
               </p>
+            </div>
+          )}
+
+          {netScreen === 'qr' && (
+            <div style={{display:'flex',flexDirection:'column',gap:14,width:'100%',alignItems:'stretch'}}>
+              <div style={{display:'flex', alignItems:'center', justifyContent:'space-between', gap:10}}>
+                <div style={{color:'#9CA3AF', fontSize:10, letterSpacing:2, textTransform:'uppercase'}}>
+                  {roomCode ? 'Join room QR' : 'Install / join QR'}
+                </div>
+                <button onClick={() => setNetScreen('menu')} style={{
+                  background:'none', border:'1px solid rgba(255,255,255,.2)', borderRadius:8,
+                  padding:'8px 12px', color:'#9CA3AF', fontSize:11, cursor:'pointer', fontFamily:'Georgia,serif',
+                }}>← Back</button>
+              </div>
+              <div style={{background:'rgba(0,0,0,.25)', border:'1px solid rgba(255,255,255,.08)', borderRadius:14, padding:18, display:'flex', flexDirection:'column', alignItems:'center', gap:12, textAlign:'center'}}>
+                <div style={{ color:'#9CA3AF', fontSize:10, letterSpacing:2, textTransform:'uppercase' }}>
+                  {roomCode ? 'Scan to join room' : 'Scan to install / join'}
+                </div>
+                <div style={{ width:180, height:180, borderRadius:14, background:'rgba(255,255,255,.04)', border:'1px solid rgba(255,255,255,.12)', display:'flex', alignItems:'center', justifyContent:'center', overflow:'hidden', boxShadow:'0 12px 24px rgba(0,0,0,.25)' }}>
+                  {qrCodeUrl ? (
+                    <img src={qrCodeUrl} alt="QR code" style={{ width:'100%', height:'100%', objectFit:'cover' }} />
+                  ) : (
+                    <span style={{ color:'#9CA3AF', fontSize:11, letterSpacing:1 }}>Generating…</span>
+                  )}
+                </div>
+                <div style={{ color:'#FFD700', fontSize:12, fontWeight:'bold', lineHeight:1.5 }}>
+                  {roomCode ? `Room ${roomCode}` : APP_DOWNLOAD_URL ? 'Download the APK or open the join link' : 'Set VITE_APK_DOWNLOAD_URL to enable APK QR'}
+                </div>
+                <div style={{ color:'#C7D2FE', fontSize:10, fontFamily:'monospace', wordBreak:'break-all', lineHeight:1.5 }}>
+                  {qrShareUrl || 'No APK URL configured yet'}
+                </div>
+              </div>
             </div>
           )}
 

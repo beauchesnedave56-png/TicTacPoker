@@ -7,3 +7,9 @@ npx cap add android — génère le projet Android natif (dossier android/), une
 npm run android — (script que j'ai ajouté) rebuild + synchronise + ouvre Android Studio.
 Dans Android Studio : Build → Build Bundle(s)/APK(s) → Build APK(s). L'APK debug apparaît dans android/app/build/outputs/apk/debug/.
 Transfère ce fichier .apk sur les deux téléphones (câble, Drive, etc.) et installe-le — c'est là que ton mode développeur entre en jeu.
+
+GitHub Action de release APK :
+- Le workflow .github/workflows/android-release.yml construit automatiquement le projet Android, génère un APK et publie le fichier `TicTacPoker.apk` sur une GitHub Release.
+- Le QR code pointe vers `https://github.com/beauchesnedave56-png/TicTacPoker/releases/latest/download/TicTacPoker.apk`.
+- Pour lancer la publication manuellement : Actions → Android APK Release → Run workflow, puis saisir le tag (ex. `v1.0.0`).
+- Pour un tag push, il suffit de créer un tag `v*.*.*` et le workflow publie l'APK automatiquement.
