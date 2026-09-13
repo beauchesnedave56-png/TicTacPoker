@@ -215,12 +215,9 @@ function CardEl({ card, onClick, glowing, dimmed, selected, size='md', highlight
       opacity: dimmed ? .45 : 1,
       cursor: onClick ? 'pointer' : 'default',
       position:'relative', fontFamily:'Georgia,serif', userSelect:'none',
-      color:clr, overflow:'hidden', transition:'transform .18s,box-shadow .18s,border-color .18s',
-      transform: highlight ? 'scale(1.14) translateY(-4px)' : 'none',
+      color:clr, overflow:'hidden', transition:'box-shadow .18s,border-color .18s',
       zIndex: highlight ? 5 : 1,
     }}
-      onMouseEnter={e=>{ if(onClick) e.currentTarget.style.transform='scale(1.09) translateY(-4px)'; }}
-      onMouseLeave={e=>{ e.currentTarget.style.transform = highlight ? 'scale(1.14) translateY(-4px)' : 'none'; }}
     >
       {sp ? (
         <>
@@ -1293,98 +1290,6 @@ export default function TicATacPoker() {
         )}
       </div>
 
-      {/* Status — hidden during the plain "pick a card" phase; the active
-          player's name pill and grid glow already show whose turn it is.
-          Kept only when it holds an actual control (Joker picker, held card,
-          steal prompt, game over). */}
-      {phase !== 'picking' && (
-      <div style={{
-        background:'rgba(0,0,0,.45)',
-        border:`1px solid ${isSteal?'rgba(255,107,53,.5)':isWild?'rgba(255,215,0,.5)':'rgba(255,215,0,.25)'}`,
-        borderRadius:12, padding:'9px 22px', marginBottom:16, textAlign:'center',
-        animation: gameOver ? 'none' : isSteal ? 'stGlow 1.5s infinite' : isWild ? 'glow 2s infinite' : 'glow 2s infinite',
-        minWidth:'min(300px, 100%)', maxWidth:'94vw',
-      }}>
-        {phase !== 'placing' && (
-          <div style={{color:isSteal?'#FF6B35':isWild?'#FFD700':turnClr,fontSize:14,fontWeight:'bold'}}>{phaseMsg}</div>
-        )}
-        {isWild && !wildSelection && (canIAct ? (
-          <div style={{marginTop:12,display:'flex',flexDirection:'column',gap:8}}>
-            <div style={{color:'#9CA3AF',fontSize:11}}>Step 1 — Choose a Suit:</div>
-            <div style={{display:'flex',gap:6,justifyContent:'center',flexWrap:'wrap'}}>
-              {[
-                {suit:'♠',color:'#E5E7EB',name:'Spades (Black)'},
-                {suit:'♥',color:'#C0392B',name:'Hearts (Red)'},
-                {suit:'♦',color:'#C0392B',name:'Diamonds (Red)'},
-                {suit:'♣',color:'#E5E7EB',name:'Clubs (Black)'},
-              ].map(s=>(
-                <button key={s.suit} onClick={()=>selectWildSuit(s.suit)} style={{
-                  padding:'8px 14px',borderRadius:6,border:'2px solid '+s.color+'80',
-                  background:s.color+'15',color:s.color,fontSize:15,fontWeight:'bold',
-                  cursor:'pointer',transition:'all .2s',title:s.name,
-                }}
-                  onMouseEnter={e=>{ e.currentTarget.style.background=s.color+'30'; e.currentTarget.style.boxShadow=`0 0 10px ${s.color}40`; }}
-                  onMouseLeave={e=>{ e.currentTarget.style.background=s.color+'15'; e.currentTarget.style.boxShadow='none'; }}
-                >{s.suit}</button>
-              ))}
-            </div>
-          </div>
-        ) : (
-          <div style={{marginTop:10,color:'#6B7280',fontSize:11,fontStyle:'italic'}}>⏳ Waiting for opponent…</div>
-        ))}
-        {isWild && wildSelection && canIAct && (
-          <div style={{marginTop:12,display:'flex',flexDirection:'column',gap:8}}>
-            <div style={{color:'#9CA3AF',fontSize:11}}>
-              Step 2 — Choose a Value for <span style={{color: RED.has(wildSelection.suit)?'#C0392B':'#fff'}}>{wildSelection.suit}</span>:
-            </div>
-            <div style={{display:'flex',gap:5,justifyContent:'center',flexWrap:'wrap',maxWidth:260}}>
-              {VALUES.map(v=>(
-                <button key={v} onClick={()=>selectWildValue(v)} style={{
-                  padding:'6px 9px',borderRadius:6,border:'2px solid rgba(255,215,0,.5)',
-                  background:'rgba(255,215,0,.1)',color:'#FFD700',fontSize:13,fontWeight:'bold',
-                  cursor:'pointer',transition:'all .2s',
-                }}
-                  onMouseEnter={e=>{ e.currentTarget.style.background='rgba(255,215,0,.28)'; }}
-                  onMouseLeave={e=>{ e.currentTarget.style.background='rgba(255,215,0,.1)'; }}
-                >{v}</button>
-              ))}
-            </div>
-            <button onClick={cancelWildSuit} style={{
-              alignSelf:'center',background:'none',border:'none',color:'#6B7280',
-              fontSize:10,cursor:'pointer',textDecoration:'underline',fontFamily:'Georgia,serif',
-            }}>← back to suit</button>
-          </div>
-        )}
-      {held && phase==='placing' && (
-          <div style={{display:'flex',flexDirection:'column',gap:6}}>
-            <div style={{color:turnClr,fontSize:13,fontWeight:'bold'}}>
-              {turn===0?'Player 1 🔵':'Player 2 🔴'}
-            </div>
-            {canIAct ? (
-              <>
-                <div style={{color:'#9CA3AF',fontSize:11}}>
-                  Holding: <span style={{color:'#FFD700'}}>{held.card.value+held.card.suit}</span>{held.card.fromWild && <span style={{color:'#6B7280'}}> (from 🃏)</span>} → click your grid
-                </div>
-                {held.fromSteal
-                  ? <div style={{color:'#6B7280',fontSize:9,fontStyle:'italic'}}>Stolen card — must be placed</div>
-                  : <button onClick={unselectCard} style={{
-                      padding:'4px 10px',borderRadius:4,border:'1px solid #FFD700',
-                      background:'rgba(255,215,0,.1)',color:'#FFD700',fontSize:10,cursor:'pointer',
-                      fontFamily:'Georgia,serif',transition:'all .2s',
-                    }}
-                      onMouseEnter={e=>{ e.currentTarget.style.background='rgba(255,215,0,.2)'; }}
-                      onMouseLeave={e=>{ e.currentTarget.style.background='rgba(255,215,0,.1)'; }}
-                    >✕ Unselect Card</button>
-                }
-              </>
-            ) : (
-              <div style={{color:'#6B7280',fontSize:11,fontStyle:'italic'}}>⏳ Opponent is placing their card…</div>
-            )}
-          </div>
-        )}
-      </div>
-      )}
-
       {/* Grid Switcher Tabs (Mobile or Team Switcher) */}
       {!gameOver && netScreen === 'playing' && (
         <div style={{
@@ -1573,6 +1478,98 @@ export default function TicATacPoker() {
           </div>
         )}
       </div>
+
+      {/* Status — hidden during the plain "pick a card" phase; the active
+          player's name pill and grid glow already show whose turn it is.
+          Kept only when it holds an actual control (Joker picker, held card,
+          steal prompt, game over). */}
+      {phase !== 'picking' && (
+      <div style={{
+        background:'rgba(0,0,0,.45)',
+        border:`1px solid ${isSteal?'rgba(255,107,53,.5)':isWild?'rgba(255,215,0,.5)':'rgba(255,215,0,.25)'}`,
+        borderRadius:12, padding:'9px 22px', marginTop:16, marginBottom:16, textAlign:'center',
+        animation: gameOver ? 'none' : isSteal ? 'stGlow 1.5s infinite' : isWild ? 'glow 2s infinite' : 'glow 2s infinite',
+        minWidth:'min(300px, 100%)', maxWidth:'94vw',
+      }}>
+        {phase !== 'placing' && (
+          <div style={{color:isSteal?'#FF6B35':isWild?'#FFD700':turnClr,fontSize:14,fontWeight:'bold'}}>{phaseMsg}</div>
+        )}
+        {isWild && !wildSelection && (canIAct ? (
+          <div style={{marginTop:12,display:'flex',flexDirection:'column',gap:8}}>
+            <div style={{color:'#9CA3AF',fontSize:11}}>Step 1 — Choose a Suit:</div>
+            <div style={{display:'flex',gap:6,justifyContent:'center',flexWrap:'wrap'}}>
+              {[
+                {suit:'♠',color:'#E5E7EB',name:'Spades (Black)'},
+                {suit:'♥',color:'#C0392B',name:'Hearts (Red)'},
+                {suit:'♦',color:'#C0392B',name:'Diamonds (Red)'},
+                {suit:'♣',color:'#E5E7EB',name:'Clubs (Black)'},
+              ].map(s=>(
+                <button key={s.suit} onClick={()=>selectWildSuit(s.suit)} style={{
+                  padding:'8px 14px',borderRadius:6,border:'2px solid '+s.color+'80',
+                  background:s.color+'15',color:s.color,fontSize:15,fontWeight:'bold',
+                  cursor:'pointer',transition:'all .2s',title:s.name,
+                }}
+                  onMouseEnter={e=>{ e.currentTarget.style.background=s.color+'30'; e.currentTarget.style.boxShadow=`0 0 10px ${s.color}40`; }}
+                  onMouseLeave={e=>{ e.currentTarget.style.background=s.color+'15'; e.currentTarget.style.boxShadow='none'; }}
+                >{s.suit}</button>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <div style={{marginTop:10,color:'#6B7280',fontSize:11,fontStyle:'italic'}}>⏳ Waiting for opponent…</div>
+        ))}
+        {isWild && wildSelection && canIAct && (
+          <div style={{marginTop:12,display:'flex',flexDirection:'column',gap:8}}>
+            <div style={{color:'#9CA3AF',fontSize:11}}>
+              Step 2 — Choose a Value for <span style={{color: RED.has(wildSelection.suit)?'#C0392B':'#fff'}}>{wildSelection.suit}</span>:
+            </div>
+            <div style={{display:'flex',gap:5,justifyContent:'center',flexWrap:'wrap',maxWidth:260}}>
+              {VALUES.map(v=>(
+                <button key={v} onClick={()=>selectWildValue(v)} style={{
+                  padding:'6px 9px',borderRadius:6,border:'2px solid rgba(255,215,0,.5)',
+                  background:'rgba(255,215,0,.1)',color:'#FFD700',fontSize:13,fontWeight:'bold',
+                  cursor:'pointer',transition:'all .2s',
+                }}
+                  onMouseEnter={e=>{ e.currentTarget.style.background='rgba(255,215,0,.28)'; }}
+                  onMouseLeave={e=>{ e.currentTarget.style.background='rgba(255,215,0,.1)'; }}
+                >{v}</button>
+              ))}
+            </div>
+            <button onClick={cancelWildSuit} style={{
+              alignSelf:'center',background:'none',border:'none',color:'#6B7280',
+              fontSize:10,cursor:'pointer',textDecoration:'underline',fontFamily:'Georgia,serif',
+            }}>← back to suit</button>
+          </div>
+        )}
+      {held && phase==='placing' && (
+          <div style={{display:'flex',flexDirection:'column',gap:6}}>
+            <div style={{color:turnClr,fontSize:13,fontWeight:'bold'}}>
+              {turn===0?'Player 1 🔵':'Player 2 🔴'}
+            </div>
+            {canIAct ? (
+              <>
+                <div style={{color:'#9CA3AF',fontSize:11}}>
+                  Holding: <span style={{color:'#FFD700'}}>{held.card.value+held.card.suit}</span>{held.card.fromWild && <span style={{color:'#6B7280'}}> (from 🃏)</span>} → click your grid
+                </div>
+                {held.fromSteal
+                  ? <div style={{color:'#6B7280',fontSize:9,fontStyle:'italic'}}>Stolen card — must be placed</div>
+                  : <button onClick={unselectCard} style={{
+                      padding:'4px 10px',borderRadius:4,border:'1px solid #FFD700',
+                      background:'rgba(255,215,0,.1)',color:'#FFD700',fontSize:10,cursor:'pointer',
+                      fontFamily:'Georgia,serif',transition:'all .2s',
+                    }}
+                      onMouseEnter={e=>{ e.currentTarget.style.background='rgba(255,215,0,.2)'; }}
+                      onMouseLeave={e=>{ e.currentTarget.style.background='rgba(255,215,0,.1)'; }}
+                    >✕ Unselect Card</button>
+                }
+              </>
+            ) : (
+              <div style={{color:'#6B7280',fontSize:11,fontStyle:'italic'}}>⏳ Opponent is placing their card…</div>
+            )}
+          </div>
+        )}
+      </div>
+      )}
 
       {/* Game Over */}
       {gameOver && (
