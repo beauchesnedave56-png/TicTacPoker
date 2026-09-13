@@ -499,11 +499,11 @@ export default function TicATacPoker() {
       return;
     }
 
-    // Online 1v1 on mobile: slow the view flip so the other player's placement
-    // animation can finish before the player switch is visible.
+    // Online 1v1 on mobile: keep the active player's board in view, with a longer
+    // delay when it's the opponent's turn so their placement animation can finish.
     if (gameMode === '1v1' && isMobile) {
-      const target = turn === myPlayerIdx ? myPlayerIdx : turn;
-      const delay = turn === myPlayerIdx ? 800 : 1200;
+      const target = turn;
+      const delay = turn === myPlayerIdx ? 0 : 1000;
       focusDelayRef.current = setTimeout(() => setViewedPlayer(target), delay);
       return () => {
         if (focusDelayRef.current) {
