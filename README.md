@@ -10,6 +10,6 @@ Transfère ce fichier .apk sur les deux téléphones (câble, Drive, etc.) et in
 
 GitHub Action de release APK :
 - Le workflow .github/workflows/android-release.yml construit automatiquement le projet Android, génère un APK et publie le fichier `TicTacPoker.apk` sur une GitHub Release.
-- Le QR code pointe vers `https://github.com/beauchesnedave56-png/TicTacPoker/releases/latest/download/TicTacPoker.apk`.
+- Le QR code pointe vers `https://github.com/beauchesnedave56-png/TicTacPoker/releases/download/v1.0.3/TicTacPoker.apk`.
 - Pour lancer la publication manuellement : Actions → Android APK Release → Run workflow, puis saisir le tag (ex. `v1.0.0`).
 - Pour un tag push, il suffit de créer un tag `v*.*.*` et le workflow publie l'APK automatiquement.
