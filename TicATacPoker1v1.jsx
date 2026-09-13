@@ -452,7 +452,9 @@ export default function TicATacPoker() {
   // ── Réseau : écran de menu, hôte/invité, code de partie ──
   const [netScreen, setNetScreen] = useState('menu'); // menu | qr | hosting | joining | playing
   const [netMode,   setNetMode]   = useState('local'); // local | host | guest
-  const [gameMode,  setGameMode]  = useState('1v1');   // 1v1 | 2v2
+  const [gameMode,  setGameMode]  = useState('1v1');   // 1v1 | 1v1v1 | 2v2
+  const [aiMode,    setAiMode]    = useState(false);
+  const [aiDifficulty, setAiDifficulty] = useState('medium'); // easy | medium | hard
   const [profile,   setProfile]   = useState(() => loadStoredProfile());
   const [draftName, setDraftName]  = useState(() => loadStoredProfile().displayName);
   const [history,   setHistory]   = useState(() => loadStoredHistory());
@@ -820,11 +822,28 @@ export default function TicATacPoker() {
   const getPlayerNameBySlot = useCallback((slotIdx) => {
     if (netMode === 'local') {
       if (slotIdx === 0) return sanitizeProfileName(profile.displayName, 'Player 1');
+      if (aiMode) return `AI ${slotIdx}`;
       return `Player ${slotIdx + 1}`;
     }
     if (players[slotIdx]?.name) return players[slotIdx].name;
     return `Player ${slotIdx + 1}`;
-  }, [netMode, players, profile.displayName]);
+  }, [aiMode, netMode, players, profile.displayName]);
+
+  const getHumanSlots = useCallback((mode = gameMode) => {
+    if (!aiMode || netMode !== 'local') {
+      return Array.from({ length: mode === '2v2' ? 4 : (mode === '1v1v1' ? 3 : 2) }, (_, idx) => idx);
+    }
+    if (mode === '2v2') return [0, 2];
+    return [0];
+  }, [aiMode, gameMode, netMode]);
+
+  const getAiSlots = useCallback((mode = gameMode) => {
+    const total = mode === '2v2' ? 4 : (mode === '1v1v1' ? 3 : 2);
+    const humanSet = new Set(getHumanSlots(mode));
+    return Array.from({ length: total }, (_, idx) => idx).filter(idx => !humanSet.has(idx));
+  }, [getHumanSlots, gameMode]);
+
+  const isHumanSlot = useCallback((slotIdx, mode = gameMode) => getHumanSlots(mode).includes(slotIdx), [getHumanSlots, gameMode]);
 
   const appendHistoryEntry = useCallback(() => {
     const numPlayers = gameMode === '2v2' ? 4 : (gameMode === '1v1v1' ? 3 : 2);
@@ -901,7 +920,8 @@ export default function TicATacPoker() {
     setGrids(newGrids);
     setTurn(0); setPhase('picking'); setHeld(null); setStealTarget(null); setWildSelection(null);
     setGameOver(false); setFinalSc(Array(numPlayers).fill(0)); setLog([]); historyWrittenRef.current = false;
-    addLog(`🃏 New game! ${gameMode} Mode. ${getPlayerNameBySlot(0)} picks first.`,`#FFD700`);
+    const aiLabel = aiMode && netMode === 'local' ? ` vs ${aiDifficulty.toUpperCase()} AI` : '';
+    addLog(`🃏 New game! ${gameMode} Mode${aiLabel}. ${getPlayerNameBySlot(0)} picks first.`,`#FFD700`);
     if (netMode === 'host') broadcastState({
       deck:rem, pool:p, grids:newGrids, turn:0, phase:'picking', held:null,
       stealTarget:null, gameOver:false, finalSc:Array(numPlayers).fill(0), log:[], gameMode
@@ -1064,6 +1084,162 @@ export default function TicATacPoker() {
     });
   };
 
+  const chooseAiPlacement = useCallback(() => {
+    if (!held || !Array.isArray(grids[turn]) || phase !== 'placing' || gameOver || !aiMode || netMode !== 'local' || isHumanSlot(turn)) return null;
+    const currentGrid = grids[turn];
+    const candidateCells = currentGrid
+      .map((card, idx) => (card ? null : idx))
+      .filter(idx => idx !== null);
+
+    if (!candidateCells.length) return null;
+
+    const scored = candidateCells.map(cellIdx => {
+      const trial = [...currentGrid];
+      trial[cellIdx] = held.card;
+      const current = totalScore(currentGrid);
+      const projected = totalScore(trial);
+      const lineScore = getLines(trial).filter(l => (l.cards.every(Boolean) || l.guaranteed) && l.score > 0).reduce((sum, line) => sum + line.score, 0);
+      const drawBonus = getLines(currentGrid).filter(l => l.cells.includes(cellIdx)).reduce((sum, line) => sum + (line.preview ? 2 : 0) + (line.guaranteed ? 5 : 0), 0);
+      let score = (projected - current) * 4 + lineScore * 0.8 + drawBonus;
+      if (held.card.value === 'A' || held.card.value === 'K' || held.card.value === 'Q') score += 2;
+      if (held.card.steal) score += 4;
+      if (held.card.wild) score += 3;
+      return { cellIdx, score };
+    }).sort((a, b) => b.score - a.score);
+
+    if (aiDifficulty === 'easy') {
+      const top = scored.slice(0, Math.min(3, scored.length));
+      return top[Math.floor(Math.random() * top.length)].cellIdx;
+    }
+    if (aiDifficulty === 'medium') {
+      const top = scored.slice(0, Math.min(2, scored.length));
+      return top[Math.random() < 0.75 ? 0 : top.length - 1].cellIdx;
+    }
+    return scored[0].cellIdx;
+  }, [aiDifficulty, aiMode, gameOver, grids, held, isHumanSlot, netMode, phase, turn]);
+
+  const chooseAiSteal = useCallback(() => {
+    if (!held || phase !== 'steal' || gameOver || !aiMode || netMode !== 'local' || isHumanSlot(turn)) return;
+    const targets = (gameMode === '2v2'
+      ? [0, 1, 2, 3].filter(idx => idx !== turn && idx % 2 !== turn % 2)
+      : [0, 1, 2, 3].filter(idx => idx !== turn).slice(0, gameMode === '1v1v1' ? 2 : 1));
+
+    const options = [];
+    targets.forEach(targetIdx => {
+      grids[targetIdx].forEach((card, cellIdx) => {
+        if (!card) return;
+        let score = VNUM[card.value] || 0;
+        if (card.wild) score += 10;
+        const relevantLines = getLines(grids[targetIdx]).filter(line => line.cells.includes(cellIdx));
+        score += relevantLines.reduce((sum, line) => sum + (line.score || 0), 0) * 0.5;
+        if (aiDifficulty === 'hard') score += (card.value === 'A' || card.value === 'K' ? 6 : 0);
+        options.push({ targetIdx, cellIdx, score });
+      });
+    });
+
+    if (!options.length) return;
+    options.sort((a, b) => b.score - a.score);
+    const winner = aiDifficulty === 'easy'
+      ? options[Math.min(options.length - 1, Math.floor(Math.random() * Math.min(3, options.length)))]
+      : aiDifficulty === 'medium'
+        ? options[Math.min(options.length - 1, Math.floor(Math.random() * Math.min(2, options.length)))]
+        : options[0];
+
+    stealCard(winner.cellIdx, winner.targetIdx);
+  }, [aiDifficulty, aiMode, gameMode, grids, gameOver, held, isHumanSlot, netMode, phase, stealCard, turn]);
+
+  const chooseAiWildChoice = useCallback(() => {
+    if (!held || !grids[turn] || gameOver || !aiMode || netMode !== 'local' || isHumanSlot(turn)) return null;
+    const options = [];
+    SUITS.forEach(suit => {
+      VALUES.forEach(value => {
+        let score = 0;
+        grids[turn].forEach((card, cellIdx) => {
+          if (card) return;
+          const trial = [...grids[turn]];
+          trial[cellIdx] = { ...held.card, suit, value, wild: false, fromWild: true, label: undefined };
+          score += totalScore(trial) - totalScore(grids[turn]);
+        });
+        const suitMatches = grids[turn].filter(card => card && card.suit === suit).length * 4;
+        const valueMatches = grids[turn].filter(card => card && card.value === value).length * 3;
+        score += suitMatches + valueMatches;
+        options.push({ suit, value, score });
+      });
+    });
+    options.sort((a, b) => b.score - a.score);
+    if (aiDifficulty === 'easy') {
+      const top = options.slice(0, Math.min(8, options.length));
+      return top[Math.floor(Math.random() * top.length)];
+    }
+    if (aiDifficulty === 'medium') {
+      return options[Math.min(options.length - 1, Math.floor(Math.random() * 3))];
+    }
+    return options[0];
+  }, [aiDifficulty, aiMode, gameOver, grids, held, isHumanSlot, netMode, turn]);
+
+  useEffect(() => {
+    if (!aiMode || netMode !== 'local' || gameOver || isHumanSlot(turn)) return;
+    const timer = setTimeout(() => {
+      if (phase === 'picking') {
+        if (!pool.length) return;
+        const ranked = pool
+          .map((card, poolIdx) => {
+            if (!card) return null;
+            let score = 0;
+            if (card.steal) score += 18;
+            if (card.wild) score += 17;
+            score += (card.value === 'A' || card.value === 'K' ? 6 : 0);
+            const localGrid = grids[turn];
+            localGrid.forEach((gridCard, cellIdx) => {
+              if (gridCard) return;
+              const trial = [...localGrid];
+              trial[cellIdx] = card;
+              score += (totalScore(trial) - totalScore(localGrid)) * 3;
+            });
+            if (aiDifficulty === 'medium') score = score * (0.7 + Math.random() * 0.6);
+            if (aiDifficulty === 'easy') score = score * (0.45 + Math.random() * 0.8);
+            return { poolIdx, score };
+          })
+          .filter(Boolean)
+          .sort((a, b) => b.score - a.score);
+
+        if (!ranked.length) return;
+        const choice = aiDifficulty === 'easy'
+          ? ranked[Math.min(ranked.length - 1, Math.floor(Math.random() * Math.min(3, ranked.length)))]
+          : aiDifficulty === 'medium'
+            ? ranked[Math.min(ranked.length - 1, Math.floor(Math.random() * Math.min(2, ranked.length)))]
+            : ranked[0];
+        pickCard(choice.poolIdx);
+        return;
+      }
+
+      if (phase === 'wild-select') {
+        const choice = chooseAiWildChoice();
+        if (!choice) return;
+        if (!wildSelection) {
+          selectWildSuit(choice.suit);
+        } else {
+          selectWildValue(choice.value, choice.suit);
+        }
+        return;
+      }
+
+      if (phase === 'placing') {
+        const targetCell = chooseAiPlacement();
+        if (targetCell !== null && targetCell !== undefined) {
+          placeCard(targetCell);
+        }
+        return;
+      }
+
+      if (phase === 'steal') {
+        chooseAiSteal();
+      }
+    }, 500);
+
+    return () => clearTimeout(timer);
+  }, [aiDifficulty, aiMode, chooseAiPlacement, chooseAiSteal, chooseAiWildChoice, gameOver, grids, isHumanSlot, netMode, phase, pickCard, placeCard, pool, selectWildSuit, selectWildValue, turn, wildSelection]);
+
   // ── Hôte : exécute une action reçue de l'invité, comme si elle venait d'un clic local ──
   function handleRemoteAction(msg) {
     switch (msg.name) {
@@ -1092,14 +1268,15 @@ export default function TicATacPoker() {
   const gClr   = {S:'#FFD700',A:'#FF6B35',B:'#A855F7',C:'#3B82F6',D:'#10B981',F:'#6B7280'};
 
   const isSteal   = phase === 'steal';
-  const canIAct = netMode === 'local' || (turn % players.length === myPlayerIdx);
+  const canIAct = netMode === 'local' ? (!aiMode || isHumanSlot(turn)) : (turn % players.length === myPlayerIdx);
   const isWild    = phase === 'wild-select';
   const turnClr   = P_CLR[turn];
   const turnName = getPlayerNameBySlot(turn);
-  const phaseMsg  = phase==='picking'  ? `${turnName} — choose a card from the pool`
-                  : phase==='placing'  ? `${turnName} — place your card on your grid`
-                  : phase==='wild-select' ? `${turnName} — choose exactly which card your JOKER becomes`
-                  : phase==='steal'    ? `${turnName} — click a card on the opponent's grid to steal!`
+  const aiTurnLabel = aiMode && netMode === 'local' && !isHumanSlot(turn) ? ' (AI)' : '';
+  const phaseMsg  = phase==='picking'  ? `${turnName}${aiTurnLabel} — choose a card from the pool`
+                  : phase==='placing'  ? `${turnName}${aiTurnLabel} — place your card on your grid`
+                  : phase==='wild-select' ? `${turnName}${aiTurnLabel} — choose exactly which card your JOKER becomes`
+                  : phase==='steal'    ? `${turnName}${aiTurnLabel} — click a card on the opponent's grid to steal!`
                   : 'Game Over';
 
   return (
@@ -1164,6 +1341,38 @@ export default function TicATacPoker() {
               </div>
 
               <div style={{
+                display:'flex', gap:6, background:'rgba(0,0,0,.22)', padding:4, borderRadius:12,
+                border:'1px solid rgba(255,255,255,.08)', marginBottom:8,
+              }}>
+                <button onClick={() => setAiMode(false)} style={{
+                  flex:1, padding:'8px 10px', borderRadius:8, border:'none',
+                  background: !aiMode ? 'rgba(75,158,255,.15)' : 'transparent',
+                  color: !aiMode ? '#4B9EFF' : '#9CA3AF', fontSize:11, fontWeight:'bold', cursor:'pointer',
+                }}>Pass &amp; Play</button>
+                <button onClick={() => setAiMode(true)} style={{
+                  flex:1, padding:'8px 10px', borderRadius:8, border:'none',
+                  background: aiMode ? 'rgba(255,215,0,.15)' : 'transparent',
+                  color: aiMode ? '#FFD700' : '#9CA3AF', fontSize:11, fontWeight:'bold', cursor:'pointer',
+                }}>Play vs AI</button>
+              </div>
+
+              {aiMode && (
+                <div style={{
+                  display:'flex', gap:6, background:'rgba(0,0,0,.25)', padding:4, borderRadius:10,
+                  border:'1px solid rgba(255,255,255,.08)', marginBottom:8,
+                }}>
+                  {['easy', 'medium', 'hard'].map(level => (
+                    <button key={level} onClick={() => setAiDifficulty(level)} style={{
+                      flex:1, padding:'8px 0', borderRadius:8, border:'none',
+                      background: aiDifficulty === level ? 'rgba(255,215,0,.15)' : 'transparent',
+                      color: aiDifficulty === level ? '#FFD700' : '#9CA3AF', fontSize:10, fontWeight:'bold',
+                      cursor:'pointer', textTransform:'capitalize',
+                    }}>{level}</button>
+                  ))}
+                </div>
+              )}
+
+              <div style={{
                 background:'rgba(0,0,0,.25)', border:'1px solid rgba(255,255,255,.1)',
                 borderRadius:12, padding:12, display:'flex', flexDirection:'column', gap:8,
               }}>
@@ -1193,7 +1402,7 @@ export default function TicATacPoker() {
                 padding:'16px 0',borderRadius:12,border:'1px solid rgba(255,215,0,.4)',
                 background:'rgba(255,215,0,.08)',color:'#FFD700',fontSize:15,fontWeight:'bold',
                 cursor:'pointer',fontFamily:'Georgia,serif',
-              }}>🎮 Play Locally (pass &amp; play)</button>
+              }}>🎮 {aiMode ? `Play vs AI (${aiDifficulty})` : 'Play Locally (pass & play)'}</button>
               <button onClick={handleQuickJoin} style={{
                 padding:'16px 0',borderRadius:12,border:'none',
                 background:'linear-gradient(135deg,#FFD700,#FF8C00)',color:'#1A1A2E',fontSize:15,fontWeight:'bold',
