@@ -132,6 +132,59 @@ const HAND_CLR = {
   'Flush Draw':'#3B82F6','Straight Draw':'#A855F7',
 };
 
+const PROFILE_STORAGE_KEY = 'tatp-profile-v1';
+const HISTORY_STORAGE_KEY = 'tatp-history-v1';
+
+function createGuid() {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+  const bytes = new Uint8Array(16);
+  if (typeof crypto !== 'undefined' && crypto.getRandomValues) crypto.getRandomValues(bytes);
+  else for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+  const hex = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
+}
+
+function sanitizeProfileName(name, fallback = '') {
+  const value = String(name ?? '').trim();
+  if (!value) return fallback;
+  return value.slice(0, 24);
+}
+
+function readJsonStorage(key, fallback) {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return fallback;
+    const raw = window.localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeJsonStorage(key, value) {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return;
+    window.localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // Ignore storage quota or browser privacy issues gracefully.
+  }
+}
+
+function loadStoredProfile() {
+  const fallback = { id: createGuid(), displayName: 'Player 1', createdAt: new Date().toISOString() };
+  const stored = readJsonStorage(PROFILE_STORAGE_KEY, null);
+  if (!stored || typeof stored !== 'object') return fallback;
+  return {
+    id: typeof stored.id === 'string' && stored.id ? stored.id : createGuid(),
+    displayName: sanitizeProfileName(stored.displayName, 'Player 1'),
+    createdAt: typeof stored.createdAt === 'string' ? stored.createdAt : new Date().toISOString(),
+  };
+}
+
+function loadStoredHistory() {
+  const stored = readJsonStorage(HISTORY_STORAGE_KEY, []);
+  return Array.isArray(stored) ? stored : [];
+}
+
 // ─── Card Visual ──────────────────────────────────────────────────────────────
 function CardEl({ card, onClick, glowing, dimmed, selected, size='md', highlight, highlightColor }) {
   if (!card) return null;
@@ -360,6 +413,9 @@ export default function TicATacPoker() {
   const [netScreen, setNetScreen] = useState('menu'); // menu | hosting | joining | playing
   const [netMode,   setNetMode]   = useState('local'); // local | host | guest
   const [gameMode,  setGameMode]  = useState('1v1');   // 1v1 | 2v2
+  const [profile,   setProfile]   = useState(() => loadStoredProfile());
+  const [draftName, setDraftName]  = useState(() => loadStoredProfile().displayName);
+  const [history,   setHistory]   = useState(() => loadStoredHistory());
   const [roomCode,  setRoomCode]  = useState('');
   const [joinInput, setJoinInput] = useState('');
   const [connStatus,setConnStatus] = useState('idle'); // idle | connecting | connected | error
@@ -383,6 +439,7 @@ export default function TicATacPoker() {
   const [log,      setLog]      = useState([]);
   const [showDetails, setShowDetails] = useState(false);
   const detailsRef = useRef(null);
+  const historyWrittenRef = useRef(false);
 
   // Swappable view state (mobile-first)
   const [viewedPlayer, setViewedPlayer] = useState(myPlayerIdx);
@@ -525,7 +582,7 @@ export default function TicATacPoker() {
     setNetMode('host');
     setNetScreen('hosting');
     setConnStatus('connecting');
-    setPlayers([{ id: 'host', idx: 0, name: 'Host (P1)' }]);
+    setPlayers([{ id: 'host', idx: 0, name: sanitizeProfileName(profile.displayName, 'Player 1') }]);
     setMyPlayerIdx(0);
     const code = fixedCode || makeRoomCode();
     const p = new Peer(ROOM_PREFIX + code);
@@ -616,6 +673,55 @@ export default function TicATacPoker() {
     setLog(p => [{msg,clr,id:Date.now()+Math.random()}, ...p].slice(0,50));
   },[]);
 
+  const getPlayerNameBySlot = useCallback((slotIdx) => {
+    if (netMode === 'local') {
+      if (slotIdx === 0) return sanitizeProfileName(profile.displayName, 'Player 1');
+      return `Player ${slotIdx + 1}`;
+    }
+    if (players[slotIdx]?.name) return players[slotIdx].name;
+    return `Player ${slotIdx + 1}`;
+  }, [netMode, players, profile.displayName]);
+
+  const appendHistoryEntry = useCallback(() => {
+    const numPlayers = gameMode === '2v2' ? 4 : (gameMode === '1v1v1' ? 3 : 2);
+    const playerNames = Array.from({length:numPlayers}, (_, idx) => getPlayerNameBySlot(idx));
+    const winnerIndex = finalSc.reduce((bestIdx, score, idx, arr) => score > arr[bestIdx] ? idx : bestIdx, 0);
+    const winnerName = playerNames[winnerIndex] || 'Player 1';
+    const summary = `${winnerName} won ${finalSc[winnerIndex]}-${finalSc.filter((_, idx) => idx !== winnerIndex).sort((a, b) => b - a)[0] ?? 0}`;
+    const entry = {
+      id: createGuid(),
+      createdAt: new Date().toISOString(),
+      gameMode,
+      netMode,
+      winnerName,
+      summary,
+      scores: finalSc.slice(0, numPlayers),
+      players: playerNames,
+    };
+    setHistory(prev => [entry, ...prev].slice(0, 20));
+  }, [finalSc, gameMode, getPlayerNameBySlot, netMode]);
+
+  useEffect(() => {
+    setDraftName(profile.displayName);
+  }, [profile.displayName]);
+
+  useEffect(() => {
+    writeJsonStorage(HISTORY_STORAGE_KEY, history);
+  }, [history]);
+
+  const saveProfile = () => {
+    const nextName = sanitizeProfileName(draftName, '');
+    const nextProfile = { ...profile, displayName: nextName, updatedAt: new Date().toISOString() };
+    setProfile(nextProfile);
+    writeJsonStorage(PROFILE_STORAGE_KEY, nextProfile);
+  };
+
+  useEffect(() => {
+    if (!gameOver || historyWrittenRef.current) return;
+    historyWrittenRef.current = true;
+    appendHistoryEntry();
+  }, [gameOver, appendHistoryEntry]);
+
   // Pull next card from deck into a pool slot
   const refill = (poolArr, deckArr, slotIdx) => {
     const p = [...poolArr], d = [...deckArr];
@@ -634,8 +740,8 @@ export default function TicATacPoker() {
     setDeck(rem); setPool(p);
     setGrids(newGrids);
     setTurn(0); setPhase('picking'); setHeld(null); setStealTarget(null); setWildSelection(null);
-    setGameOver(false); setFinalSc(Array(numPlayers).fill(0)); setLog([]);
-    addLog(`🃏 New game! ${gameMode} Mode. Player 1 picks first.`,`#FFD700`);
+    setGameOver(false); setFinalSc(Array(numPlayers).fill(0)); setLog([]); historyWrittenRef.current = false;
+    addLog(`🃏 New game! ${gameMode} Mode. ${getPlayerNameBySlot(0)} picks first.`,`#FFD700`);
     if (netMode === 'host') broadcastState({
       deck:rem, pool:p, grids:newGrids, turn:0, phase:'picking', held:null,
       stealTarget:null, gameOver:false, finalSc:Array(numPlayers).fill(0), log:[], gameMode
@@ -829,10 +935,11 @@ export default function TicATacPoker() {
   const canIAct = netMode === 'local' || (turn % players.length === myPlayerIdx);
   const isWild    = phase === 'wild-select';
   const turnClr   = P_CLR[turn];
-  const phaseMsg  = phase==='picking'  ? `P${turn+1} — choose a card from the pool`
-                  : phase==='placing'  ? `P${turn+1} — place your card on your grid`
-                  : phase==='wild-select' ? `P${turn+1} — choose exactly which card your JOKER becomes`
-                  : phase==='steal'    ? `P${turn+1} — click a card on the opponent's grid to steal!`
+  const turnName = getPlayerNameBySlot(turn);
+  const phaseMsg  = phase==='picking'  ? `${turnName} — choose a card from the pool`
+                  : phase==='placing'  ? `${turnName} — place your card on your grid`
+                  : phase==='wild-select' ? `${turnName} — choose exactly which card your JOKER becomes`
+                  : phase==='steal'    ? `${turnName} — click a card on the opponent's grid to steal!`
                   : 'Game Over';
 
   return (
@@ -896,6 +1003,32 @@ export default function TicATacPoker() {
                 ))}
               </div>
 
+              <div style={{
+                background:'rgba(0,0,0,.25)', border:'1px solid rgba(255,255,255,.1)',
+                borderRadius:12, padding:12, display:'flex', flexDirection:'column', gap:8,
+              }}>
+                <div style={{color:'#9CA3AF', fontSize:10, letterSpacing:2, textTransform:'uppercase'}}>Player profile</div>
+                <input
+                  value={draftName}
+                  onChange={e => setDraftName(e.target.value)}
+                  placeholder="Player 1"
+                  style={{
+                    width:'100%', borderRadius:10, border:'1px solid rgba(255,255,255,.15)',
+                    background:'rgba(255,255,255,.04)', color:'#F3F4F6', padding:'10px 12px',
+                    fontSize:14, fontFamily:'Georgia,serif', outline:'none',
+                  }}
+                />
+                <button onClick={saveProfile} style={{
+                  padding:'8px 12px', borderRadius:8, border:'1px solid rgba(255,215,0,.4)',
+                  background:'rgba(255,215,0,.08)', color:'#FFD700', fontSize:11, fontWeight:'bold',
+                  cursor:'pointer', fontFamily:'Georgia,serif',
+                }}>Save profile</button>
+                <div style={{display:'flex', justifyContent:'space-between', gap:8, alignItems:'center'}}>
+                  <span style={{color:'#6EAB80', fontSize:10, letterSpacing:1}}>ID</span>
+                  <span style={{color:'#FFD700', fontSize:10, fontFamily:'monospace', overflowWrap:'anywhere'}}>{profile.id.slice(0, 12)}…</span>
+                </div>
+              </div>
+
               <button onClick={()=>{ setNetMode('local'); setNetScreen('playing'); startGame(); }} style={{
                 padding:'16px 0',borderRadius:12,border:'1px solid rgba(255,215,0,.4)',
                 background:'rgba(255,215,0,.08)',color:'#FFD700',fontSize:15,fontWeight:'bold',
@@ -916,9 +1049,51 @@ export default function TicATacPoker() {
                 background:'rgba(75,158,255,.1)',color:'#4B9EFF',fontSize:15,fontWeight:'bold',
                 cursor:'pointer',fontFamily:'Georgia,serif',
               }}>🔗 Join Online Game</button>
+              <button onClick={() => setNetScreen('history')} style={{
+                padding:'10px 12px', borderRadius:10, border:'1px solid rgba(255,255,255,.12)',
+                background:'rgba(255,255,255,.03)', color:'#FFD700', fontSize:11, fontWeight:'bold',
+                cursor:'pointer', fontFamily:'Georgia,serif',
+              }}>
+                {history.length === 0 ? 'History is empty' : `View history (${history.length})`}
+              </button>
+
               <p style={{color:'#6EAB80',fontSize:11,marginTop:8}}>
                 Online play needs a brief internet connection to pair the two devices, then the game runs directly between you.
               </p>
+            </div>
+          )}
+
+          {netScreen === 'history' && (
+            <div style={{display:'flex',flexDirection:'column',gap:14,width:'100%',alignItems:'stretch'}}>
+              <div style={{display:'flex', alignItems:'center', justifyContent:'space-between', gap:10}}>
+                <div style={{color:'#9CA3AF', fontSize:10, letterSpacing:2, textTransform:'uppercase'}}>Game history</div>
+                <button onClick={() => setNetScreen('menu')} style={{
+                  background:'none', border:'1px solid rgba(255,255,255,.2)', borderRadius:8,
+                  padding:'8px 12px', color:'#9CA3AF', fontSize:11, cursor:'pointer', fontFamily:'Georgia,serif',
+                }}>← Back</button>
+              </div>
+              {history.length === 0 ? (
+                <div style={{background:'rgba(0,0,0,.25)', border:'1px solid rgba(255,255,255,.1)', borderRadius:12, padding:16, color:'#6B7280', fontSize:12, textAlign:'center'}}>
+                  No games yet. Finish a match to save your history.
+                </div>
+              ) : (
+                <div style={{display:'flex', flexDirection:'column', gap:8, maxHeight:'65vh', overflowY:'auto', paddingRight:4}}>
+                  {history.map(item => (
+                    <div key={item.id} style={{
+                      background:'rgba(0,0,0,.25)', border:'1px solid rgba(255,255,255,.08)', borderRadius:12,
+                      padding:'12px 12px', display:'flex', flexDirection:'column', gap:6, textAlign:'left',
+                    }}>
+                      <div style={{display:'flex', justifyContent:'space-between', gap:8, alignItems:'center'}}>
+                        <span style={{color:'#FFD700', fontSize:11, fontWeight:'bold'}}>{item.gameMode}</span>
+                        <span style={{color:'#6EAB80', fontSize:10}}>{new Date(item.createdAt).toLocaleDateString()} · {new Date(item.createdAt).toLocaleTimeString([], {hour:'numeric', minute:'2-digit'})}</span>
+                      </div>
+                      <div style={{color:'#D1D5DB', fontSize:12, fontWeight:'bold'}}>{item.summary}</div>
+                      <div style={{color:'#9CA3AF', fontSize:10}}>Players: {item.players.join(' · ')}</div>
+                      <div style={{color:'#6EAB80', fontSize:10}}>Scores: {item.scores.join(' · ')}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
@@ -1106,8 +1281,8 @@ export default function TicATacPoker() {
       </h1>
       <p className="app-subtitle" style={{color:'#6EAB80',margin:'0 0 6px',fontSize:10,letterSpacing:2,textAlign:'center'}}>
         {netMode==='local'
-          ? 'LOCAL 1v1 · EACH PLAYER HAS THEIR OWN GRID · SHARED 5-CARD POOL · WILD & STEAL CARDS'
-          : `ONLINE 1v1 · YOU ARE PLAYER ${myPlayerIdx+1} · ROOM ${roomCode || '—'}`}
+        ? `LOCAL 1v1 · ${sanitizeProfileName(profile.displayName, 'Player 1')} VS ${getPlayerNameBySlot(1)} · SHARED 5-CARD POOL · WILD & STEAL CARDS`
+        : `ONLINE 1v1 · YOU ARE ${sanitizeProfileName(profile.displayName, 'Player 1')} · ROOM ${roomCode || '—'}`}
       </p>
       <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:10}}>
         {netMode !== 'local' && (
@@ -1336,7 +1511,7 @@ export default function TicATacPoker() {
             <Fragment key={i}>
               <div style={{display:'flex',flexDirection:'column',gap:8,alignItems:'center',animation:'in .3s'}}>
                 <PlayerGrid
-                  grid={grids[i]} label={`P${i+1}${netMode!=='local'&&myPlayerIdx===i?' (YOU)':''}`} color={P_CLR[i]}
+                  grid={grids[i]} label={`${getPlayerNameBySlot(i)}${netMode!=='local'&&myPlayerIdx===i?' (YOU)':''}`} color={P_CLR[i]}
                   score={scores[i]} isActive={turn===i&&!gameOver}
                   canPlace={phase==='placing'&&turn===i&&!gameOver&&canIAct}
                   stealMode={isSteal && (gameMode==='2v2' ? (i%2 !== turn%2) : (i !== turn)) && canIAct}

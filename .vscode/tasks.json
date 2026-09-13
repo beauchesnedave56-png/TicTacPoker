@@ -11,6 +11,20 @@
         "kind": "build",
         "isDefault": true
       }
+    },
+    {
+      "label": "Build Android",
+      "type": "shell",
+      "command": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"Set-Location 'c:\\Users\\MindF\\Documents\\TicTacPoker'; npm run build; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; npx cap sync android\"",
+      "options": {
+        "cwd": "c:\\Users\\MindF\\Documents\\TicTacPoker"
+      },
+      "isBackground": false,
+      "problemMatcher": [],
+      "group": {
+        "kind": "build",
+        "isDefault": false
+      }
     }
   ]
 }
