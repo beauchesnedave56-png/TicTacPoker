@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import React, { Fragment, useState, useEffect, useCallback, useRef } from "react";
 import Peer from "peerjs";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -182,45 +182,6 @@ function CardEl({ card, onClick, glowing, dimmed, selected, size='md', highlight
         <div style={{position:'absolute',top:'8%',left:'12%',lineHeight:1.05,textAlign:'left'}}>
           <div style={{fontSize:d.rf,fontWeight:'bold'}}>{card.value}</div>
           <div style={{fontSize:d.rf-7,marginTop:2}}>{card.suit}</div>
-          {netScreen === 'lobby' && (
-            <div style={{display:'flex',flexDirection:'column',gap:16,width:'100%',alignItems:'center'}}>
-              <div style={{background:'rgba(0,0,0,.4)', border:'2px solid rgba(255,215,0,.3)', borderRadius:16, padding:16, width:'100%'}}>
-                <div style={{color:'#9CA3AF', fontSize:11, letterSpacing:2, marginBottom:12}}>GAME LOBBY · {gameMode} MODE</div>
-                <div style={{display:'flex', flexDirection:'column', gap:8}}>
-                  {players.map(p => (
-                    <div key={p.id} style={{display:'flex', justifyContent:'space-between', alignItems:'center', background:'rgba(255,255,255,.05)', padding:'8px 12px', borderRadius:10}}>
-                      <span style={{color:P_CLR[p.idx], fontWeight:'bold', fontSize:14}}>{p.name} {p.idx === myPlayerIdx && '(YOU)'}</span>
-                      <span style={{fontSize:10, color:'#6EAB80'}}>● Ready</span>
-                    </div>
-                  ))}
-                  {Array.from({length: (gameMode==='2v2'?4:gameMode==='1v1v1'?3:2) - players.length}).map((_, i) => (
-                    <div key={i} style={{display:'flex', justifyContent:'space-between', alignItems:'center', background:'rgba(0,0,0,.2)', padding:'8px 12px', borderRadius:10, border:'1px dashed rgba(255,255,255,.1)'}}>
-                      <span style={{color:'#6B7280', fontSize:13}}>Waiting for player…</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              {netMode === 'host' ? (
-                <button onClick={() => {
-                  connsRef.current.forEach(c => c.send({ type: 'start' }));
-                  setNetScreen('playing');
-                  startGame();
-                }} style={{
-                  padding:'16px 0',borderRadius:12,border:'none', width:'100%',
-                  background:'linear-gradient(135deg,#FFD700,#FF8C00)',color:'#1A1A2E',fontSize:15,fontWeight:'bold',
-                  cursor:'pointer',fontFamily:'Georgia,serif',
-                }}>🚀 Start Game</button>
-              ) : (
-                <p style={{color:'#6EAB80',fontSize:12,animation:'glow 2s infinite'}}>⏳ Waiting for host to start…</p>
-              )}
-
-              <button onClick={leaveGame} style={{
-                background:'none',border:'1px solid rgba(255,255,255,.2)',borderRadius:8,
-                padding:'8px 20px',color:'#9CA3AF',fontSize:12,cursor:'pointer',fontFamily:'Georgia,serif',
-              }}>← Leave</button>
-            </div>
-          )}
         </div>
       )}
       <div style={{position:'absolute',top:0,left:0,right:0,height:'38%',
@@ -1372,7 +1333,7 @@ export default function TicATacPoker() {
           if (!isVisible) return null;
 
           return (
-            <React.Fragment key={i}>
+            <Fragment key={i}>
               <div style={{display:'flex',flexDirection:'column',gap:8,alignItems:'center',animation:'in .3s'}}>
                 <PlayerGrid
                   grid={grids[i]} label={`P${i+1}${netMode!=='local'&&myPlayerIdx===i?' (YOU)':''}`} color={P_CLR[i]}
@@ -1410,7 +1371,7 @@ export default function TicATacPoker() {
                   </div>
                 </div>
               )}
-            </React.Fragment>
+            </Fragment>
           );
         })}
 
