@@ -488,7 +488,6 @@ export default function TicATacPoker() {
   // Swappable view state (mobile-first)
   const [viewedPlayer, setViewedPlayer] = useState(myPlayerIdx);
   const [isMobile, setIsMobile] = useState(() => window.innerWidth < 768);
-  const focusDelayRef = useRef(null);
 
   useEffect(() => {
     const m = window.matchMedia("(max-width: 768px)");
@@ -498,9 +497,9 @@ export default function TicATacPoker() {
     return () => m.removeEventListener("change", onChange);
   }, []);
 
-  // Local / team-view switching is immediate and can react to steal phase changes.
-  // For 1v1 mobile, the board flip must be tied to the actual turn change so the
-  // opponent's placement animation has time to read before the view changes.
+  // Mobile 1v1 needs a brief delay when the opponent acts so the move is visible
+  // before the board flips. Steal rounds are special: the acting player should see
+  // the victim board immediately while they choose the target.
   useEffect(() => {
     if (gameOver) return;
 
@@ -509,8 +508,23 @@ export default function TicATacPoker() {
       return;
     }
 
+    if (gameMode === '1v1' && isMobile) {
+      if (phase === 'steal' && turn === myPlayerIdx) {
+        setViewedPlayer((turn + 1) % grids.length);
+        return;
+      }
+
+      if (turn !== myPlayerIdx) {
+        const timer = setTimeout(() => setViewedPlayer(turn), 1200);
+        return () => clearTimeout(timer);
+      }
+
+      setViewedPlayer(myPlayerIdx);
+      return;
+    }
+
     const needsSwitch = isMobile || gameMode === '2v2';
-    if (!needsSwitch || (gameMode === '1v1' && isMobile)) return;
+    if (!needsSwitch) return;
 
     if (turn === myPlayerIdx && phase === 'steal') {
       setViewedPlayer((turn + 1) % grids.length);
@@ -518,26 +532,6 @@ export default function TicATacPoker() {
       setViewedPlayer(myPlayerIdx);
     }
   }, [turn, phase, netMode, gameOver, isMobile, gameMode, myPlayerIdx, grids.length]);
-
-  useEffect(() => {
-    if (gameOver || !isMobile || gameMode !== '1v1' || netMode === 'local') return;
-
-    if (focusDelayRef.current) {
-      clearTimeout(focusDelayRef.current);
-      focusDelayRef.current = null;
-    }
-
-    const target = turn;
-    const delay = turn === myPlayerIdx ? 0 : 1200;
-    focusDelayRef.current = setTimeout(() => setViewedPlayer(target), delay);
-
-    return () => {
-      if (focusDelayRef.current) {
-        clearTimeout(focusDelayRef.current);
-        focusDelayRef.current = null;
-      }
-    };
-  }, [turn, isMobile, gameMode, netMode, myPlayerIdx, gameOver]);
 
   // ── Envoyer l'état complet à l'adversaire (hôte uniquement, source de vérité) ──
   const broadcastState = useCallback((overrides={}) => {
