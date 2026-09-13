@@ -447,6 +447,7 @@ export default function TicATacPoker() {
   const [qrCodeUrl, setQrCodeUrl] = useState('');
   const [apkDownloadUrl, setApkDownloadUrl] = useState(APP_DOWNLOAD_URL);
   const [updateStatus, setUpdateStatus] = useState('');
+  const playersRef = useRef([]);
   const liveRef = useRef({}); // toujours à jour après chaque rendu ; lu par les callbacks PeerJS pour éviter les closures périmées
   const [myPlayerIdx, setMyPlayerIdx] = useState(0); // assigned by host
 
@@ -468,6 +469,7 @@ export default function TicATacPoker() {
   // Swappable view state (mobile-first)
   const [viewedPlayer, setViewedPlayer] = useState(myPlayerIdx);
   const [isMobile, setIsMobile] = useState(() => window.innerWidth < 768);
+  const focusDelayRef = useRef(null);
 
   useEffect(() => {
     const m = window.matchMedia("(max-width: 768px)");
@@ -480,27 +482,41 @@ export default function TicATacPoker() {
   // Auto-switch viewed grid or team (Phone needs it for 1v1/2v2, Fold needs it for 2v2)
   useEffect(() => {
     if (gameOver) return;
+    if (focusDelayRef.current) {
+      clearTimeout(focusDelayRef.current);
+      focusDelayRef.current = null;
+    }
 
-    // In 1v1 on Fold, both grids are visible, no need to switch.
-    // In all other cases (Mobile or 2v2 on Fold), we need to switch the view automatically.
     const needsSwitch = isMobile || gameMode === '2v2';
     if (!needsSwitch) return;
 
     if (netMode === 'local') {
-      // Local Pass & Play: switch to target grid for stealing, then back to active player for placing
       if (phase === 'steal') {
-        // Switch to an opponent's team/grid
         setViewedPlayer((turn + 1) % grids.length);
       } else {
         setViewedPlayer(turn);
       }
+      return;
+    }
+
+    // Online 1v1 on mobile: slow the view flip so the other player's placement
+    // animation can finish before the player switch is visible.
+    if (gameMode === '1v1' && isMobile) {
+      const target = turn === myPlayerIdx ? myPlayerIdx : turn;
+      const delay = turn === myPlayerIdx ? 800 : 1200;
+      focusDelayRef.current = setTimeout(() => setViewedPlayer(target), delay);
+      return () => {
+        if (focusDelayRef.current) {
+          clearTimeout(focusDelayRef.current);
+          focusDelayRef.current = null;
+        }
+      };
+    }
+
+    if (turn === myPlayerIdx && phase === 'steal') {
+      setViewedPlayer((turn + 1) % grids.length);
     } else {
-      // Online Mode
-      if (turn === myPlayerIdx && phase === 'steal') {
-        setViewedPlayer((turn + 1) % grids.length);
-      } else {
-        setViewedPlayer(myPlayerIdx);
-      }
+      setViewedPlayer(myPlayerIdx);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [turn, phase, netMode, gameOver, isMobile, gameMode, myPlayerIdx, grids.length]);
@@ -545,22 +561,23 @@ export default function TicATacPoker() {
     c.on('open', () => {
       if (liveRef.current.netMode === 'host') {
         // Host: assign a player index to the new guest
-        const live = liveRef.current;
-        const maxP = live.gameMode === '2v2' ? 4 : (live.gameMode === '1v1v1' ? 3 : 2);
-        if (live.players.length >= maxP) {
+        const hostPlayers = playersRef.current;
+        const maxP = liveRef.current.gameMode === '2v2' ? 4 : (liveRef.current.gameMode === '1v1v1' ? 3 : 2);
+        if (hostPlayers.length >= maxP) {
           c.send({ type: 'error', payload: { msg: 'This room is already full.' }});
           setTimeout(() => c.close(), 500);
           return;
         }
 
         connsRef.current.push(c);
-        const newIdx = live.players.length; // Host is 0, guests are 1, 2, 3
-        const newPlayers = [...live.players, { id: c.peer, idx: newIdx, name: `Player ${newIdx+1}` }];
+        const newIdx = hostPlayers.length; // Host is 0, guests are 1, 2, 3
+        const newPlayers = [...hostPlayers, { id: c.peer, idx: newIdx, name: `Player ${newIdx+1}` }];
+        playersRef.current = newPlayers;
         setPlayers(newPlayers);
         setConnStatus('connected');
         setNetScreen('lobby');
         // Welcome the guest and tell them their index
-        c.send({ type: 'welcome', payload: { myPlayerIdx: newIdx, gameMode: live.gameMode, players: newPlayers }});
+        c.send({ type: 'welcome', payload: { myPlayerIdx: newIdx, gameMode: liveRef.current.gameMode, players: newPlayers }});
         // Update other guests about the new player
         connsRef.current.forEach(otherC => {
           if (otherC !== c && otherC.open) otherC.send({ type: 'state', payload: { players: newPlayers }});
@@ -579,20 +596,20 @@ export default function TicATacPoker() {
         setMyPlayerIdx(data.payload.myPlayerIdx);
         setGameMode(data.payload.gameMode);
         setPlayers(data.payload.players);
+        playersRef.current = data.payload.players;
       }
       if (data.type === 'player-profile' && live.netMode === 'host') {
-        const guestName = sanitizeProfileName(data.payload.name, `Player ${live.players.length + 1}`);
-        setPlayers(prev => {
-          const next = prev.map(player => (player.id === data.payload.id || player.id === c.peer)
-            ? { ...player, name: guestName }
-            : player);
-          if (next.every(player => player.id !== data.payload.id && player.id !== c.peer)) {
-            next.push({ id: data.payload.id || c.peer, idx: prev.length, name: guestName });
-          }
-          connsRef.current.forEach(otherC => {
-            if (otherC !== c && otherC.open) otherC.send({ type: 'state', payload: { players: next } });
-          });
-          return next;
+        const guestName = sanitizeProfileName(data.payload.name, `Player ${playersRef.current.length + 1}`);
+        const next = playersRef.current.map(player => (player.id === data.payload.id || player.id === c.peer)
+          ? { ...player, name: guestName }
+          : player);
+        if (next.every(player => player.id !== data.payload.id && player.id !== c.peer)) {
+          next.push({ id: data.payload.id || c.peer, idx: playersRef.current.length, name: guestName });
+        }
+        playersRef.current = next;
+        setPlayers(next);
+        connsRef.current.forEach(otherC => {
+          if (otherC.open) otherC.send({ type: 'state', payload: { players: next } });
         });
       }
       if (data.type === 'error' && live.netMode === 'guest') {
@@ -622,7 +639,9 @@ export default function TicATacPoker() {
     setNetMode('host');
     setNetScreen('hosting');
     setConnStatus('connecting');
-    setPlayers([{ id: profile.id, idx: 0, name: sanitizeProfileName(profile.displayName, 'Player 1') }]);
+    const hostPlayer = { id: profile.id, idx: 0, name: sanitizeProfileName(profile.displayName, 'Player 1') };
+    playersRef.current = [hostPlayer];
+    setPlayers([hostPlayer]);
     setMyPlayerIdx(0);
     const code = fixedCode || makeRoomCode();
     const p = new Peer(ROOM_PREFIX + code);
@@ -761,6 +780,10 @@ export default function TicATacPoker() {
   }, []);
 
   useEffect(() => {
+    playersRef.current = players;
+  }, [players]);
+
+  useEffect(() => {
     if (!showDetails) return;
     const handleOutside = e => {
       if (detailsRef.current && !detailsRef.current.contains(e.target)) setShowDetails(false);
@@ -819,16 +842,15 @@ export default function TicATacPoker() {
       connsRef.current[0].send({ type: 'player-profile', payload: { name: nextName || 'Player 1', id: nextProfile.id } });
     }
     if (netMode === 'host') {
-      setPlayers(prev => {
-        const updated = prev.map(player => (
-          player.id === nextProfile.id || player.idx === 0
-            ? { ...player, name: nextName || 'Player 1' }
-            : player
-        ));
-        connsRef.current.forEach(c => {
-          if (c.open) c.send({ type: 'state', payload: { players: updated } });
-        });
-        return updated;
+      const updated = playersRef.current.map(player => (
+        player.id === nextProfile.id || player.idx === 0
+          ? { ...player, name: nextName || 'Player 1' }
+          : player
+      ));
+      playersRef.current = updated;
+      setPlayers(updated);
+      connsRef.current.forEach(c => {
+        if (c.open) c.send({ type: 'state', payload: { players: updated } });
       });
     }
   };
@@ -1039,7 +1061,7 @@ export default function TicATacPoker() {
   // agir sur l'état et les fonctions les plus récents plutôt que sur une
   // closure figée au moment de la connexion.
   useEffect(() => {
-    liveRef.current = { netMode, applyRemoteState, handleRemoteAction, startGame, gameMode, players };
+    liveRef.current = { netMode, applyRemoteState, handleRemoteAction, startGame, gameMode, players: playersRef.current };
   });
 
   const scores = grids.map(g => totalScore(g));
