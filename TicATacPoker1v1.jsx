@@ -1,6 +1,6 @@
 import React, { Fragment, useState, useEffect, useCallback, useRef } from "react";
 import { Preferences } from "@capacitor/preferences";
-import Peer from "peerjs";
+import { Peer } from "peerjs";
 import QRCode from "qrcode";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -10,7 +10,48 @@ const VNUM   = {'2':2,'3':3,'4':4,'5':5,'6':6,'7':7,'8':8,'9':9,'10':10,'J':11,'
 const RED    = new Set(['♥','♦']);
 const P_CLR  = ['#4B9EFF','#FF5F5F','#A855F7','#FFAD60']; // P1 (Blue), P2 (Red), P3 (Purple), P4 (Orange)
 const TEAM_CLR = ['#4B9EFF', '#FF5F5F'];
-const ROOM_PREFIX = 'tictacpoker'; // namespace so we don't collide with other apps on the public PeerJS broker
+const ROOM_PREFIX = 'tatp'; // keep broker IDs short; some PeerServers reject IDs over 16 chars
+const PEER_OPEN_TIMEOUT_MS = 12000;
+const PEER_OPTIONS = {
+  host: '0.peerjs.com',
+  port: 443,
+  path: '/',
+  secure: true,
+  config: {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun.cloudflare.com:3478' },
+    ],
+  },
+};
+
+function roomPeerId(code) {
+  return (ROOM_PREFIX + String(code || '')).toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function createPeer(id) {
+  if (typeof Peer !== 'function') {
+    throw new Error('PeerJS failed to load');
+  }
+  return id ? new Peer(id, PEER_OPTIONS) : new Peer(PEER_OPTIONS);
+}
+
+function destroyPeer(peer) {
+  if (!peer) return;
+  try { peer.destroy(); } catch { /* already closed */ }
+}
+
+function peerErrorMessage(err, fallback) {
+  const type = err && err.type;
+  if (type === 'network' || type === 'socket-error' || type === 'server-error' || type === 'socket-closed') {
+    return 'Network error. Check your internet connection.';
+  }
+  if (type === 'unavailable-id') return 'That room code is already in use. Try hosting again.';
+  if (type === 'browser-incompatible') return 'This browser cannot host an online game (WebRTC unavailable).';
+  if (type === 'peer-unavailable') return fallback;
+  if (type) return `${fallback} (Error: ${type})`;
+  return fallback;
+}
 const APP_WEB_URL = (import.meta.env.VITE_WEB_APP_URL || 'https://beauchesnedave56-png.github.io/TicTacPoker/').replace(/\/+$/, '') + '/';
 const DEFAULT_APK_DOWNLOAD_URL = 'https://github.com/beauchesnedave56-png/TicTacPoker/releases/latest/download/TicTacPoker.apk';
 const APP_DOWNLOAD_URL = import.meta.env.VITE_APK_DOWNLOAD_URL || DEFAULT_APK_DOWNLOAD_URL;
@@ -472,6 +513,8 @@ export default function TicATacPoker() {
   const [connStatus,setConnStatus] = useState('idle'); // idle | connecting | connected | error
   const [connErr,   setConnErr]   = useState('');
   const peerRef = useRef(null);
+  const peerTimeoutRef = useRef(null);
+  const peerSessionRef = useRef(0);
   const connsRef = useRef([]); // Multiple connections for the host
   const [players,   setPlayers]   = useState([]); // { id, name, idx }
   const [qrCodeUrl, setQrCodeUrl] = useState('');
@@ -572,9 +615,27 @@ export default function TicATacPoker() {
     if (c && c.open) c.send({ type:'action', name, args });
   };
 
+  const clearPeerTimeout = () => {
+    if (peerTimeoutRef.current != null) {
+      clearTimeout(peerTimeoutRef.current);
+      peerTimeoutRef.current = null;
+    }
+  };
+
+  const teardownNetworking = () => {
+    peerSessionRef.current += 1;
+    clearPeerTimeout();
+    connsRef.current.forEach(c => { try { c.close(); } catch { /* ignore */ } });
+    connsRef.current = [];
+    destroyPeer(peerRef.current);
+    peerRef.current = null;
+  };
+
   // ── Câblage commun d'une connexion PeerJS établie (côté hôte ET invité) ──
   const wireConnection = c => {
-    c.on('open', () => {
+    const onReady = () => {
+      if (c._tatpReady) return;
+      c._tatpReady = true;
       if (liveRef.current.netMode === 'host') {
         // Host: assign a player index to the new guest
         const hostPlayers = playersRef.current;
@@ -605,7 +666,9 @@ export default function TicATacPoker() {
         connsRef.current = [c];
         c.send({ type: 'player-profile', payload: { name: sanitizeProfileName(profile.displayName, 'Player 1'), id: profile.id } });
       }
-    });
+    };
+    c.on('open', onReady);
+    if (c.open) onReady();
     c.on('data', data => {
       const live = liveRef.current;
       if (data.type === 'welcome' && live.netMode === 'guest') {
@@ -651,80 +714,150 @@ export default function TicATacPoker() {
     });
   };
 
-  const startHosting = (fixedCode) => {
-    setNetMode('host');
-    setNetScreen('hosting');
-    setConnStatus('connecting');
-    setRoomCode('');
+  const startHosting = (fixedCode, retryCount = 0) => {
+    teardownNetworking();
+    const session = peerSessionRef.current;
+    const code = (typeof fixedCode === 'string' && fixedCode.trim()) ? fixedCode.trim().toUpperCase() : makeRoomCode();
     const hostPlayer = { id: profile.id, idx: 0, name: sanitizeProfileName(profile.displayName, 'Player 1') };
     playersRef.current = [hostPlayer];
     setPlayers([hostPlayer]);
     setMyPlayerIdx(0);
-    const code = fixedCode || makeRoomCode();
-    // Ensure clean alphanumeric ID for the broker
-    const fullId = (ROOM_PREFIX + code).toLowerCase().replace(/[^a-z0-9]/g, '');
-    const p = new Peer(fullId);
+    setNetMode('host');
+    setNetScreen('lobby');
+    setConnStatus('connecting');
+    setConnErr('');
+    setRoomCode(code);
+
+    const fail = (message) => {
+      if (peerSessionRef.current !== session) return;
+      clearPeerTimeout();
+      setConnStatus('error');
+      setConnErr(message);
+    };
+
+    let p;
+    try {
+      p = createPeer(roomPeerId(code));
+    } catch (err) {
+      fail(err && err.message ? err.message : 'Could not create the game room.');
+      return;
+    }
     peerRef.current = p;
+    peerTimeoutRef.current = setTimeout(() => {
+      fail('Timed out creating the game room. Check your internet connection and try again.');
+    }, PEER_OPEN_TIMEOUT_MS);
+
     p.on('open', () => {
+      if (peerSessionRef.current !== session) return;
+      clearPeerTimeout();
       setRoomCode(code);
       setConnStatus('waiting');
+      setNetScreen('lobby');
     });
     p.on('connection', c => wireConnection(c));
+    p.on('disconnected', () => {
+      if (peerSessionRef.current !== session) return;
+      try { p.reconnect(); } catch { fail('Disconnected from the matchmaking server.'); }
+    });
     p.on('error', err => {
-      if (err.type === 'unavailable-id' && !fixedCode) { p.destroy(); startHosting(); return; }
-      setConnStatus('error');
-      setConnErr(err.type === 'network'
-        ? 'Network error. Check your internet connection.'
-        : 'Could not create the game room (Error: ' + err.type + ')');
+      if (peerSessionRef.current !== session) return;
+      if (err && err.type === 'unavailable-id' && !fixedCode && retryCount < 8) {
+        startHosting(undefined, retryCount + 1);
+        return;
+      }
+      fail(peerErrorMessage(err, 'Could not create the game room.'));
     });
   };
 
   const handleQuickJoin = () => {
     const quickCode = 'QUICK';
+    teardownNetworking();
+    const session = peerSessionRef.current;
     setNetMode('guest');
     setNetScreen('joining');
     setConnStatus('connecting');
+    setConnErr('');
     setJoinInput(quickCode);
-    const p = new Peer();
+    let p;
+    try {
+      p = createPeer();
+    } catch (err) {
+      setConnStatus('error');
+      setConnErr(err && err.message ? err.message : 'Quick Join failed.');
+      return;
+    }
     peerRef.current = p;
+    peerTimeoutRef.current = setTimeout(() => {
+      if (peerSessionRef.current !== session) return;
+      setConnStatus('error');
+      setConnErr('Quick Join timed out. Check your internet connection and try again.');
+    }, PEER_OPEN_TIMEOUT_MS);
     p.on('open', () => {
-      const fullId = (ROOM_PREFIX + quickCode).toLowerCase().replace(/[^a-z0-9]/g, '');
-      const c = p.connect(fullId, { reliable:true });
+      if (peerSessionRef.current !== session) return;
+      clearPeerTimeout();
+      const c = p.connect(roomPeerId(quickCode), { reliable: true });
       wireConnection(c);
     });
     p.on('error', err => {
-      if (err.type === 'peer-unavailable') {
-        p.destroy();
+      if (peerSessionRef.current !== session) return;
+      if (err && err.type === 'peer-unavailable') {
         startHosting(quickCode);
       } else {
+        clearPeerTimeout();
         setConnStatus('error');
-        setConnErr('Quick Join failed: ' + err.type);
+        setConnErr(peerErrorMessage(err, 'Quick Join failed.'));
       }
     });
   };
 
   const startJoining = (fixedCode) => {
-    const code = fixedCode || joinInput.trim().toUpperCase();
+    const code = (typeof fixedCode === 'string' && fixedCode.trim())
+      ? fixedCode.trim().toUpperCase()
+      : joinInput.trim().toUpperCase();
     if (!code) return;
+    teardownNetworking();
+    const session = peerSessionRef.current;
     setNetMode('guest');
     setNetScreen('joining');
     setConnStatus('connecting');
-    const p = new Peer();
+    setConnErr('');
+    let p;
+    try {
+      p = createPeer();
+    } catch (err) {
+      setConnStatus('error');
+      setConnErr(err && err.message ? err.message : 'Connection error.');
+      return;
+    }
     peerRef.current = p;
+    peerTimeoutRef.current = setTimeout(() => {
+      if (peerSessionRef.current !== session) return;
+      setConnStatus('error');
+      setConnErr('Connection timed out. Check the code and your internet, then try again.');
+    }, PEER_OPEN_TIMEOUT_MS);
     p.on('open', () => {
-      const fullId = (ROOM_PREFIX + code).toLowerCase().replace(/[^a-z0-9]/g, '');
-      const c = p.connect(fullId, { reliable:true });
-      c.on('error', () => { setConnStatus('error'); setConnErr("Couldn't reach that game code. Check it and try again."); });
+      if (peerSessionRef.current !== session) return;
+      const c = p.connect(roomPeerId(code), { reliable: true });
+      c.on('error', () => {
+        if (peerSessionRef.current !== session) return;
+        clearPeerTimeout();
+        setConnStatus('error');
+        setConnErr("Couldn't reach that game code. Check it and try again.");
+      });
+      c.on('open', () => {
+        if (peerSessionRef.current !== session) return;
+        clearPeerTimeout();
+      });
       wireConnection(c);
     });
     p.on('error', err => {
+      if (peerSessionRef.current !== session) return;
+      clearPeerTimeout();
       setConnStatus('error');
-      if (err.type === 'peer-unavailable') {
+      if (err && err.type === 'peer-unavailable') {
         setConnErr(`Room "${code}" not found. Check the code and try again.`);
-      } else if (err.type === 'network') {
-        setConnErr('Network error. Check your internet connection.');
       } else {
-        setConnErr('Connection error: ' + err.type);
+        setConnErr(peerErrorMessage(err, 'Connection error.'));
       }
     });
   };
@@ -791,16 +924,13 @@ export default function TicATacPoker() {
   };
 
   const leaveGame = () => {
-    connsRef.current.forEach(c => c.close());
-    if (peerRef.current) peerRef.current.destroy();
-    connsRef.current = []; peerRef.current = null;
+    teardownNetworking();
     setNetScreen('menu'); setNetMode('local'); setConnStatus('idle'); setConnErr('');
     setRoomCode(''); setJoinInput(''); setPlayers([]); setMyPlayerIdx(0);
   };
 
   useEffect(() => () => { // cleanup on unmount
-    connsRef.current.forEach(c => c.close());
-    if (peerRef.current) peerRef.current.destroy();
+    teardownNetworking();
   }, []);
 
   useEffect(() => {
@@ -1473,7 +1603,7 @@ export default function TicATacPoker() {
 
                 {/* Online Buttons */}
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginBottom: '10px' }}>
-                  <button onClick={startHosting} style={{ padding: '14px 6px', borderRadius: '12px', border: '1px solid rgba(255,215,0,.4)', background: 'rgba(255,215,0,.08)', color: '#FFD700', fontSize: '12px', fontWeight: '500', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '6px', cursor: 'pointer' }}>
+                  <button onClick={() => startHosting()} style={{ padding: '14px 6px', borderRadius: '12px', border: '1px solid rgba(255,215,0,.4)', background: 'rgba(255,215,0,.08)', color: '#FFD700', fontSize: '12px', fontWeight: '500', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '6px', cursor: 'pointer' }}>
                     <i className="ti ti-broadcast" style={{ fontSize: '20px' }}></i> Host game
                   </button>
                   <button onClick={() => setNetScreen('joining')} style={{ padding: '14px 6px', borderRadius: '12px', border: '1px solid rgba(75,158,255,.5)', background: 'rgba(75,158,255,.1)', color: '#4B9EFF', fontSize: '12px', fontWeight: '500', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '6px', cursor: 'pointer' }}>
@@ -1604,7 +1734,7 @@ export default function TicATacPoker() {
                   padding:'12px 10px',width:'100%',fontFamily:'Georgia,serif',
                 }}
               />
-              <button onClick={startJoining} disabled={connStatus==='connecting'} style={{
+              <button onClick={() => startJoining()} disabled={connStatus==='connecting'} style={{
                 padding:'12px 0',borderRadius:12,border:'none',width:'100%',
                 background:'linear-gradient(135deg,#4B9EFF,#2E6FE0)',color:'#fff',fontSize:14,fontWeight:'bold',
                 cursor: connStatus==='connecting' ? 'default' : 'pointer', opacity: connStatus==='connecting'?.6:1,
@@ -1621,6 +1751,19 @@ export default function TicATacPoker() {
             <div style={{display:'flex',flexDirection:'column',gap:16,width:'100%',alignItems:'center'}}>
               <div style={{background:'rgba(0,0,0,.4)', border:'2px solid rgba(255,215,0,.3)', borderRadius:16, padding:16, width:'100%'}}>
                 <div style={{color:'#9CA3AF', fontSize:11, letterSpacing:2, marginBottom:12}}>GAME LOBBY · {gameMode} MODE</div>
+                {netMode === 'host' && (
+                  <div style={{marginBottom:14}}>
+                    <div style={{color:'#9CA3AF',fontSize:11,letterSpacing:1,marginBottom:8}}>GIVE THIS CODE TO THE OTHER PLAYER</div>
+                    <div style={{
+                      fontSize:'clamp(1.8rem,10vw,2.6rem)',fontWeight:'bold',letterSpacing:6,color:'#FFD700',
+                      background:'rgba(0,0,0,.4)',border:'2px solid rgba(255,215,0,.4)',borderRadius:14,
+                      padding:'14px 10px',width:'100%',
+                    }}>{roomCode || '—'}</div>
+                    {connStatus==='connecting' && <p style={{color:'#6EAB80',fontSize:12,marginTop:8}}>⏳ Registering room…</p>}
+                    {(connStatus==='waiting' || connStatus==='connected') && <p style={{color:'#6EAB80',fontSize:12,marginTop:8,animation:'glow 2s infinite'}}>⏳ Waiting for the other player to join…</p>}
+                    {connStatus==='error' && <p style={{color:'#FF6B6B',fontSize:12,marginTop:8}}>⚠️ {connErr}</p>}
+                  </div>
+                )}
                 <div style={{display:'flex', flexDirection:'column', gap:8}}>
                   {players.map(p => (
                     <div key={p.id} style={{display:'flex', justifyContent:'space-between', alignItems:'center', background:'rgba(255,255,255,.05)', padding:'8px 12px', borderRadius:10}}>
@@ -1641,10 +1784,12 @@ export default function TicATacPoker() {
                   connsRef.current.forEach(c => c.send({ type: 'start' }));
                   setNetScreen('playing');
                   startGame();
-                }} style={{
+                }} disabled={connStatus==='connecting' || connStatus==='error'} style={{
                   padding:'16px 0',borderRadius:12,border:'none', width:'100%',
                   background:'linear-gradient(135deg,#FFD700,#FF8C00)',color:'#1A1A2E',fontSize:15,fontWeight:'bold',
-                  cursor:'pointer',fontFamily:'Georgia,serif',
+                  cursor: (connStatus==='connecting' || connStatus==='error') ? 'default' : 'pointer',
+                  opacity: (connStatus==='connecting' || connStatus==='error') ? .55 : 1,
+                  fontFamily:'Georgia,serif',
                 }}>🚀 Start Game</button>
               ) : (
                 <p style={{color:'#6EAB80',fontSize:12,animation:'glow 2s infinite'}}>⏳ Waiting for host to start…</p>
