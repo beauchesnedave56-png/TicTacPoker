@@ -14,6 +14,7 @@ const ROOM_PREFIX = 'tatp-'; // namespace so we don't collide with other apps on
 const APP_WEB_URL = (import.meta.env.VITE_WEB_APP_URL || 'https://beauchesnedave56-png.github.io/TicTacPoker/').replace(/\/+$/, '') + '/';
 const DEFAULT_APK_DOWNLOAD_URL = 'https://github.com/beauchesnedave56-png/TicTacPoker/releases/latest/download/TicTacPoker.apk';
 const APP_DOWNLOAD_URL = import.meta.env.VITE_APK_DOWNLOAD_URL || DEFAULT_APK_DOWNLOAD_URL;
+const TURN_DELAY_MS = 800;
 
 function buildInviteUrl(roomCode) {
   return new URL(`?join=${encodeURIComponent(roomCode)}`, APP_WEB_URL).toString();
@@ -304,7 +305,7 @@ function EmptyCell({ onClick, canPlace }) {
   );
 }
 
-function PlayerGrid({ grid, onPlace, canPlace, stealMode, onSteal, isActive, label, score, color }) {
+function PlayerGrid({ grid, onPlace, canPlace, stealMode, onSteal, isActive, label, score, color, playerIdx, gameMode }) {
   const [hoverLine, setHoverLine] = useState(null); // { cells, comboCells, name, label } | null
   const [flashLines, setFlashLines] = useState([]);  // [{ comboCells, name }]
   const prevCellsRef = useRef(new Set());
@@ -334,9 +335,9 @@ function PlayerGrid({ grid, onPlace, canPlace, stealMode, onSteal, isActive, lab
   const endHover   = () => setHoverLine(null);
 
   return (
-    <div style={{display:'flex',flexDirection:'column',alignItems:'center',gap:6}}>
+    <div style={{display:'flex',flexDirection:'column',alignItems:'center',gap:12}}>
       <div style={{
-        padding:'3px 14px', borderRadius:20,
+        padding:'4px 18px', borderRadius:20,
         background: isActive ? `${color}28` : 'rgba(255,255,255,.05)',
         border: isActive ? `1px solid ${color}` : '1px solid rgba(255,255,255,.1)',
         color: isActive ? color : '#9CA3AF',
@@ -344,9 +345,17 @@ function PlayerGrid({ grid, onPlace, canPlace, stealMode, onSteal, isActive, lab
         boxShadow: isActive ? `0 0 16px ${color}60` : 'none',
         animation: isActive ? 'turnPulse 1.8s ease-in-out infinite' : 'none',
         transition:'all .3s',
-      }}>{label}</div>
+        display:'flex', alignItems:'center', gap:6
+      }}>
+        {label}
+        {gameMode === '2v2' && (
+          <span style={{ fontSize:10, opacity:0.7, color: playerIdx % 2 === 0 ? TEAM_CLR[0] : TEAM_CLR[1] }}>
+            [{playerIdx % 2 === 0 ? 'TEAM A' : 'TEAM B'}]
+          </span>
+        )}
+      </div>
 
-      <div style={{display:'flex',gap:4,flexWrap:'wrap',justifyContent:'center',minHeight:16,maxWidth:210}}>
+      <div style={{display:'flex',gap:6,flexWrap:'wrap',justifyContent:'center',minHeight:20,maxWidth:240}}>
         {scoringLines.map((l,idx) => (
           <span key={idx} title={`${l.label}: ${l.name} (+${l.score})`}
             onMouseEnter={()=>startHover(l)}
@@ -398,7 +407,7 @@ function PlayerGrid({ grid, onPlace, canPlace, stealMode, onSteal, isActive, lab
         </div>
       </div>
 
-      <div style={{color:'#FFD700',fontSize:20,fontWeight:'bold',fontFamily:'Georgia,serif'}}>
+      <div style={{color:'#FFD700',fontSize:20,fontWeight:'bold',fontFamily:'Georgia,serif',marginTop:10}}>
         {score} pts
       </div>
     </div>
@@ -499,46 +508,34 @@ export default function TicATacPoker() {
     return () => m.removeEventListener("change", onChange);
   }, []);
 
-  // Mobile / 2v2 (et tout mode où on ne peut pas voir toutes les grilles à la
-  // fois) doivent attendre un peu avant de changer de vue, pour que le joueur
-  // voie réellement la carte se poser (ou le vol se terminer) avant que
-  // l'écran ne change — quel que soit le nombre de joueurs, en local ou en
-  // ligne. Seule exception : entrer en phase de vol doit être instantané,
-  // puisqu'il faut voir la grille cible tout de suite pour choisir une carte.
+  // Simplification radicale du changement de vue : on réagit DIRECTEMENT à
+  // l'état du jeu (tour et phase) sans minuteurs internes complexes.
   useEffect(() => {
     if (gameOver) return;
-    const SWITCH_DELAY_MS = 1200;
 
-    if (netMode === 'local') {
-      if (phase === 'steal') {
-        setViewedPlayer((turn + 1) % grids.length);
-        return;
-      }
-      const timer = setTimeout(() => setViewedPlayer(turn), SWITCH_DELAY_MS);
-      return () => clearTimeout(timer);
-    }
-
-    // Online — en 1v1 mobile on suit le joueur actif ; sinon on revient
-    // toujours à sa propre grille.
-    const watchingActivePlayer = gameMode === '1v1' && isMobile;
-    const needsSwitch = isMobile || gameMode === '2v2';
-    if (!needsSwitch) return;
-
-    if (phase === 'steal' && turn === myPlayerIdx) {
-      setViewedPlayer((turn + 1) % grids.length);
+    // 1. Phase de vol : on doit voir la grille de la victime pour choisir.
+    if (phase === 'steal') {
+      // En 1v1, c'est l'autre joueur. En 2v2, c'est l'équipe adverse.
+      const target = gameMode === '2v2' ? (turn % 2 === 0 ? 1 : 0) : (turn === 0 ? 1 : 0);
+      setViewedPlayer(target);
       return;
     }
 
-    if (watchingActivePlayer && turn === myPlayerIdx) {
-      // C'est mon tour : je dois reprendre la main tout de suite, pas d'attente.
-      setViewedPlayer(myPlayerIdx);
+    // 2. Phase d'attente : on RESTE sur le joueur qui vient de jouer pour
+    // laisser le temps à l'adversaire de voir ce qui s'est passé.
+    if (phase === 'waiting') {
+      setViewedPlayer(turn);
       return;
     }
 
-    const target = watchingActivePlayer ? turn : myPlayerIdx;
-    const timer = setTimeout(() => setViewedPlayer(target), SWITCH_DELAY_MS);
-    return () => clearTimeout(timer);
-  }, [turn, phase, netMode, gameOver, isMobile, gameMode, myPlayerIdx, grids.length]);
+    // 3. Phase de jeu normale (picking/placing) : on suit le joueur actif.
+    // Sur desktop (non-mobile) 1v1 on voit tout, donc on ne change rien,
+    // mais sur Mobile ou en 2v2/1v1v1, on suit le tour.
+    const needsSwitch = isMobile || gameMode !== '1v1';
+    if (needsSwitch) {
+      setViewedPlayer(turn);
+    }
+  }, [turn, phase, gameOver, isMobile, gameMode, grids.length]);
 
   // ── Envoyer l'état complet à l'adversaire (hôte uniquement, source de vérité) ──
   const broadcastState = useCallback((overrides={}) => {
@@ -833,7 +830,7 @@ export default function TicATacPoker() {
     if (!aiMode || netMode !== 'local') {
       return Array.from({ length: mode === '2v2' ? 4 : (mode === '1v1v1' ? 3 : 2) }, (_, idx) => idx);
     }
-    if (mode === '2v2') return [0, 2];
+    // In 2v2 vs AI, only the first player is human.
     return [0];
   }, [aiMode, gameMode, netMode]);
 
@@ -1017,7 +1014,13 @@ export default function TicATacPoker() {
       return;
     }
 
-    advanceTurn(newPool, newDeck, newGrids);
+    // Delay the turn advancement so the player can see the card placement and any scoring animation
+    setPhase('waiting');
+    if (netMode === 'host') broadcastState({ grids: newGrids, pool: newPool, deck: newDeck, phase: 'waiting' });
+
+    setTimeout(() => {
+      advanceTurn(newPool, newDeck, newGrids);
+    }, TURN_DELAY_MS);
   };
 
   // ── Steal a card from opponent's grid ──
@@ -1037,12 +1040,18 @@ export default function TicATacPoker() {
 
     // Now the stolen card is held and player must place it on their own grid
     const newHeld = { card: stolen, poolIdx: null, fromSteal: true };
-    setHeld(newHeld);
-    setPhase('placing');
-    setStealTarget(null);
-    if (netMode === 'host') broadcastState({
-      grids:newGrids, pool:newPool, deck:newDeck, held:newHeld, phase:'placing', stealTarget:null,
-    });
+
+    setPhase('waiting');
+    if (netMode === 'host') broadcastState({ grids: newGrids, pool: newPool, deck: newDeck, phase: 'waiting' });
+
+    setTimeout(() => {
+      setHeld(newHeld);
+      setPhase('placing');
+      setStealTarget(null);
+      if (netMode === 'host') broadcastState({
+        grids:newGrids, pool:newPool, deck:newDeck, held:newHeld, phase:'placing', stealTarget:null,
+      });
+    }, TURN_DELAY_MS);
   };
 
   // ── Annuler la sélection en cours (remet la carte en jeu dans le pool) ──
@@ -1178,7 +1187,7 @@ export default function TicATacPoker() {
   }, [aiDifficulty, aiMode, gameOver, grids, held, isHumanSlot, netMode, turn]);
 
   useEffect(() => {
-    if (!aiMode || netMode !== 'local' || gameOver || isHumanSlot(turn)) return;
+    if (!aiMode || netMode !== 'local' || gameOver || isHumanSlot(turn) || phase === 'waiting') return;
     const timer = setTimeout(() => {
       if (phase === 'picking') {
         if (!pool.length) return;
@@ -1235,7 +1244,7 @@ export default function TicATacPoker() {
       if (phase === 'steal') {
         chooseAiSteal();
       }
-    }, 500);
+    }, 700);
 
     return () => clearTimeout(timer);
   }, [aiDifficulty, aiMode, chooseAiPlacement, chooseAiSteal, chooseAiWildChoice, gameOver, grids, isHumanSlot, netMode, phase, pickCard, placeCard, pool, selectWildSuit, selectWildValue, turn, wildSelection]);
@@ -1262,13 +1271,16 @@ export default function TicATacPoker() {
   });
 
   const scores = grids.map(g => totalScore(g));
+  const teamAScore = gameMode === '2v2' ? scores[0] + scores[2] : 0;
+  const teamBScore = gameMode === '2v2' ? scores[1] + scores[3] : 0;
   const lines  = grids.map(g => getLines(g));
 
   const grade  = s => s>=400?'S':s>=260?'A':s>=160?'B':s>=90?'C':s>=45?'D':'F';
   const gClr   = {S:'#FFD700',A:'#FF6B35',B:'#A855F7',C:'#3B82F6',D:'#10B981',F:'#6B7280'};
 
   const isSteal   = phase === 'steal';
-  const canIAct = netMode === 'local' ? (!aiMode || isHumanSlot(turn)) : (turn % players.length === myPlayerIdx);
+  const isWaiting = phase === 'waiting';
+  const canIAct = !isWaiting && (netMode === 'local' ? (!aiMode || isHumanSlot(turn)) : (turn % players.length === myPlayerIdx));
   const isWild    = phase === 'wild-select';
   const turnClr   = P_CLR[turn];
   const turnName = getPlayerNameBySlot(turn);
@@ -1277,6 +1289,7 @@ export default function TicATacPoker() {
                   : phase==='placing'  ? `${turnName}${aiTurnLabel} — place your card on your grid`
                   : phase==='wild-select' ? `${turnName}${aiTurnLabel} — choose exactly which card your JOKER becomes`
                   : phase==='steal'    ? `${turnName}${aiTurnLabel} — click a card on the opponent's grid to steal!`
+                  : phase==='waiting'  ? 'Processing action...'
                   : 'Game Over';
 
   return (
@@ -1284,7 +1297,7 @@ export default function TicATacPoker() {
       minHeight:'100vh', overflowX:'hidden', width:'100%',
       background:'radial-gradient(ellipse at 50% 0%,#1B5E3A 0%,#0F3D22 40%,#061A0F 100%)',
       display:'flex', flexDirection:'column', alignItems:'center',
-      padding:'20px 12px 40px', fontFamily:"Georgia,'Times New Roman',serif",
+      padding:'20px 8px 40px', fontFamily:"Georgia,'Times New Roman',serif",
     }}>
       <style>{`
         @keyframes glow{0%,100%{box-shadow:0 0 12px rgba(255,215,0,.2);}50%{box-shadow:0 0 28px rgba(255,215,0,.6);}}
@@ -1301,7 +1314,7 @@ export default function TicATacPoker() {
            toute seule en dessous. */
         .board-3col {
           display:flex; flex-direction:column; align-items:center;
-          gap:12px; width:100%;
+          gap:24px; width:100%;
         }
         @media (min-width:768px) {
           .board-3col { flex-direction:row; justify-content:center; align-items:flex-start; gap:14px; width:auto; }
@@ -1316,138 +1329,92 @@ export default function TicATacPoker() {
       {netScreen !== 'playing' && (
         <div style={{
           minHeight:'80vh', display:'flex', flexDirection:'column', alignItems:'center',
-          justifyContent:'center', gap:18, width:'100%', maxWidth:380, textAlign:'center',
+          justifyContent:'center', gap:18, width:'100%', maxWidth: 'min(600px, 98vw)', textAlign:'center',
         }}>
-          <h1 style={{margin:0,fontSize:'clamp(1.4rem,6vw,2.1rem)',color:'#FFD700',
-            letterSpacing:3,textShadow:'0 0 28px rgba(255,215,0,.45)',fontStyle:'italic'}}>
-            ♠ TIC-A-TAC POKER ♠
-          </h1>
 
           {netScreen === 'menu' && (
-            <div style={{display:'flex',flexDirection:'column',gap:12,width:'100%'}}>
-              {/* Mode Toggle */}
-              <div style={{
-                display:'flex', gap:4, background:'rgba(0,0,0,.3)', padding:4, borderRadius:12,
-                border:'1px solid rgba(255,255,255,.1)', marginBottom:8, overflowX:'auto'
-              }}>
-                {['1v1', '1v1v1', '2v2'].map(m => (
-                  <button key={m} onClick={() => setGameMode(m)} style={{
-                    flex:1, padding:'8px 4px', borderRadius:8, border:'none', minWidth:60,
-                    background: gameMode === m ? 'rgba(255,215,0,.15)' : 'transparent',
-                    color: gameMode === m ? '#FFD700' : '#9CA3AF',
-                    fontSize:11, fontWeight:'bold', cursor:'pointer', transition:'all .2s'
-                  }}>{m}</button>
-                ))}
-              </div>
+            <div style={{ width: '100%', maxWidth: '100%', borderRadius: '28px', padding: '10px', background: 'rgba(255,255,255,0.05)', border: '0.5px solid rgba(255,255,255,0.1)', backdropFilter: 'blur(10px)' }}>
+              <div style={{ borderRadius: '20px', overflow: 'hidden', background: 'radial-gradient(ellipse at 50% 0%, #1B5E3A 0%, #0F3D22 45%, #061A0F 100%)', padding: '20px 16px 22px', fontFamily: 'Georgia, serif' }}>
 
-              <div style={{
-                display:'flex', gap:6, background:'rgba(0,0,0,.22)', padding:4, borderRadius:12,
-                border:'1px solid rgba(255,255,255,.08)', marginBottom:8,
-              }}>
-                <button onClick={() => setAiMode(false)} style={{
-                  flex:1, padding:'8px 10px', borderRadius:8, border:'none',
-                  background: !aiMode ? 'rgba(75,158,255,.15)' : 'transparent',
-                  color: !aiMode ? '#4B9EFF' : '#9CA3AF', fontSize:11, fontWeight:'bold', cursor:'pointer',
-                }}>Pass &amp; Play</button>
-                <button onClick={() => setAiMode(true)} style={{
-                  flex:1, padding:'8px 10px', borderRadius:8, border:'none',
-                  background: aiMode ? 'rgba(255,215,0,.15)' : 'transparent',
-                  color: aiMode ? '#FFD700' : '#9CA3AF', fontSize:11, fontWeight:'bold', cursor:'pointer',
-                }}>Play vs AI</button>
-              </div>
+                {/* Title */}
+                <div style={{ textAlign: 'center', marginBottom: '14px' }}>
+                  <div style={{ color: '#FFD700', fontSize: '19px', fontStyle: 'italic', letterSpacing: '2px' }}>♠ Tic-a-tac poker ♠</div>
+                </div>
 
-              {aiMode && (
-                <div style={{
-                  display:'flex', gap:6, background:'rgba(0,0,0,.25)', padding:4, borderRadius:10,
-                  border:'1px solid rgba(255,255,255,.08)', marginBottom:8,
-                }}>
-                  {['easy', 'medium', 'hard'].map(level => (
-                    <button key={level} onClick={() => setAiDifficulty(level)} style={{
-                      flex:1, padding:'8px 0', borderRadius:8, border:'none',
-                      background: aiDifficulty === level ? 'rgba(255,215,0,.15)' : 'transparent',
-                      color: aiDifficulty === level ? '#FFD700' : '#9CA3AF', fontSize:10, fontWeight:'bold',
-                      cursor:'pointer', textTransform:'capitalize',
-                    }}>{level}</button>
+                {/* Profile Card */}
+                <div onClick={() => {}} style={{ display: 'flex', alignItems: 'center', gap: '10px', background: 'rgba(0,0,0,.28)', border: '0.5px solid rgba(255,255,255,.1)', borderRadius: '14px', padding: '8px 12px', marginBottom: '14px', cursor: 'pointer' }}>
+                  <div style={{ width: '32px', height: '32px', borderRadius: '50%', background: 'rgba(255,215,0,.15)', border: '1px solid rgba(255,215,0,.4)', display: 'flex', justifyContent: 'center', alignItems: 'center', fontSize: '13px', fontWeight: '500', color: '#FFD700', flexShrink: 0 }}>
+                    {profile.displayName.charAt(0).toUpperCase() || 'P'}
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0, textAlign: 'left' }}>
+                    <div style={{ color: '#F3F4F6', fontSize: '13px', fontWeight: '500', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{profile.displayName}</div>
+                    <div style={{ color: '#6EAB80', fontSize: '10px' }}>Tap to edit profile</div>
+                  </div>
+                  <i className="ti ti-chevron-right" style={{ color: '#6B7280', fontSize: '16px' }}></i>
+                </div>
+
+                {/* Game Mode Switcher */}
+                <div style={{ display: 'flex', gap: '4px', background: 'rgba(0,0,0,.3)', padding: '4px', borderRadius: '12px', border: '0.5px solid rgba(255,255,255,.1)', marginBottom: '16px' }}>
+                  {['1v1', '1v1v1', '2v2'].map(m => (
+                    <div key={m} onClick={() => setGameMode(m)} style={{
+                      flex: 1, textAlign: 'center', padding: '7px 0', borderRadius: '8px',
+                      background: gameMode === m ? 'rgba(255,215,0,.15)' : 'transparent',
+                      color: gameMode === m ? '#FFD700' : '#9CA3AF',
+                      fontSize: '11px', fontWeight: '500', cursor: 'pointer', transition: 'all .2s'
+                    }}>{m}</div>
                   ))}
                 </div>
-              )}
 
-              <div style={{
-                background:'rgba(0,0,0,.25)', border:'1px solid rgba(255,255,255,.1)',
-                borderRadius:12, padding:12, display:'flex', flexDirection:'column', gap:8,
-              }}>
-                <div style={{color:'#9CA3AF', fontSize:10, letterSpacing:2, textTransform:'uppercase'}}>Player profile</div>
-                <input
-                  value={draftName}
-                  onChange={e => setDraftName(e.target.value)}
-                  placeholder="Player 1"
-                  style={{
-                    width:'100%', borderRadius:10, border:'1px solid rgba(255,255,255,.15)',
-                    background:'rgba(255,255,255,.04)', color:'#F3F4F6', padding:'10px 12px',
-                    fontSize:14, fontFamily:'Georgia,serif', outline:'none',
-                  }}
-                />
-                <button onClick={saveProfile} style={{
-                  padding:'8px 12px', borderRadius:8, border:'1px solid rgba(255,215,0,.4)',
-                  background:'rgba(255,215,0,.08)', color:'#FFD700', fontSize:11, fontWeight:'bold',
-                  cursor:'pointer', fontFamily:'Georgia,serif',
-                }}>Save profile</button>
-                <div style={{display:'flex', justifyContent:'space-between', gap:8, alignItems:'center'}}>
-                  <span style={{color:'#6EAB80', fontSize:10, letterSpacing:1}}>ID</span>
-                  <span style={{color:'#FFD700', fontSize:10, fontFamily:'monospace', overflowWrap:'anywhere'}}>{profile.id.slice(0, 12)}…</span>
+                {/* Play Buttons */}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginBottom: '14px' }}>
+                  <button onClick={() => { setAiMode(false); setNetMode('local'); setNetScreen('playing'); startGame(); }} style={{ padding: '13px 6px', borderRadius: '12px', border: 'none', background: 'linear-gradient(135deg,#FFD700,#FF8C00)', color: '#1A1A2E', fontSize: '12px', fontWeight: '500', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '6px', cursor: 'pointer' }}>
+                    <i className="ti ti-player-play" style={{ fontSize: '19px' }}></i> Play locally
+                  </button>
+                  <button onClick={() => { setAiMode(true); setNetMode('local'); setNetScreen('playing'); startGame(); }} style={{ position: 'relative', padding: '13px 6px', borderRadius: '12px', border: '1px solid rgba(168,85,247,.5)', background: 'rgba(168,85,247,.1)', color: '#C084FC', fontSize: '12px', fontWeight: '500', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '6px', cursor: 'pointer' }}>
+                    <i className="ti ti-robot" style={{ fontSize: '19px' }}></i> vs AI
+                    <span style={{ position: 'absolute', top: '-5px', right: '-5px', background: '#A855F7', color: 'white', fontSize: '8px', padding: '2px 5px', borderRadius: '10px', fontWeight: 'bold', boxShadow: '0 2px 4px rgba(0,0,0,0.3)' }}>AI</span>
+                  </button>
                 </div>
+
+                {/* Separator */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '14px' }}>
+                  <div style={{ flex: 1, height: '0.5px', background: 'rgba(255,255,255,.15)' }}></div>
+                  <div style={{ color: '#6B7280', fontSize: '10px', letterSpacing: '1px' }}>or play online</div>
+                  <div style={{ flex: 1, height: '0.5px', background: 'rgba(255,255,255,.15)' }}></div>
+                </div>
+
+                {/* Online Buttons */}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginBottom: '10px' }}>
+                  <button onClick={startHosting} style={{ padding: '14px 6px', borderRadius: '12px', border: '1px solid rgba(255,215,0,.4)', background: 'rgba(255,215,0,.08)', color: '#FFD700', fontSize: '12px', fontWeight: '500', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '6px', cursor: 'pointer' }}>
+                    <i className="ti ti-broadcast" style={{ fontSize: '20px' }}></i> Host game
+                  </button>
+                  <button onClick={() => setNetScreen('joining')} style={{ padding: '14px 6px', borderRadius: '12px', border: '1px solid rgba(75,158,255,.5)', background: 'rgba(75,158,255,.1)', color: '#4B9EFF', fontSize: '12px', fontWeight: '500', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '6px', cursor: 'pointer' }}>
+                    <i className="ti ti-link" style={{ fontSize: '20px' }}></i> Join game
+                  </button>
+                </div>
+
+                {/* Quick Join */}
+                <button onClick={handleQuickJoin} style={{ width: '100%', padding: '9px 0', borderRadius: '10px', border: '1px dashed rgba(255,255,255,.15)', background: 'transparent', color: '#9CA3AF', fontSize: '11px', marginBottom: '16px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', cursor: 'pointer' }}>
+                  <i className="ti ti-bolt" style={{ fontSize: '14px' }}></i> Quick join a nearby game
+                </button>
+
+                {/* Bottom Icons */}
+                <div style={{ display: 'flex', justifyContent: 'center', gap: '22px' }}>
+                  <div onClick={() => setNetScreen('qr')} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px', cursor: 'pointer' }}>
+                    <i className="ti ti-qrcode" style={{ color: '#9CA3AF', fontSize: '19px' }}></i>
+                    <span style={{ color: '#6B7280', fontSize: '9px' }}>QR code</span>
+                  </div>
+                  <div onClick={() => setNetScreen('history')} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px', cursor: 'pointer' }}>
+                    <i className="ti ti-history" style={{ color: '#9CA3AF', fontSize: '19px' }}></i>
+                    <span style={{ color: '#6B7280', fontSize: '9px' }}>History</span>
+                  </div>
+                  <div onClick={handleUpdateRelease} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px', cursor: 'pointer' }}>
+                    <i className="ti ti-download" style={{ color: '#9CA3AF', fontSize: '19px' }}></i>
+                    <span style={{ color: '#6B7280', fontSize: '9px' }}>Update</span>
+                  </div>
+                </div>
+
               </div>
-
-              <button onClick={()=>{ setNetMode('local'); setNetScreen('playing'); startGame(); }} style={{
-                padding:'16px 0',borderRadius:12,border:'1px solid rgba(255,215,0,.4)',
-                background:'rgba(255,215,0,.08)',color:'#FFD700',fontSize:15,fontWeight:'bold',
-                cursor:'pointer',fontFamily:'Georgia,serif',
-              }}>🎮 {aiMode ? `Play vs AI (${aiDifficulty})` : 'Play Locally (pass & play)'}</button>
-              <button onClick={handleQuickJoin} style={{
-                padding:'16px 0',borderRadius:12,border:'none',
-                background:'linear-gradient(135deg,#FFD700,#FF8C00)',color:'#1A1A2E',fontSize:15,fontWeight:'bold',
-                cursor:'pointer',fontFamily:'Georgia,serif',
-              }}>⚡ Quick Join</button>
-              <button onClick={startHosting} style={{
-                padding:'16px 0',borderRadius:12,border:'1px solid rgba(255,215,0,.4)',
-                background:'rgba(255,215,0,.08)',color:'#FFD700',fontSize:15,fontWeight:'bold',
-                cursor:'pointer',fontFamily:'Georgia,serif',
-              }}>📡 Host Online Game</button>
-              <button onClick={()=>setNetScreen('joining')} style={{
-                padding:'16px 0',borderRadius:12,border:'1px solid rgba(75,158,255,.5)',
-                background:'rgba(75,158,255,.1)',color:'#4B9EFF',fontSize:15,fontWeight:'bold',
-                cursor:'pointer',fontFamily:'Georgia,serif',
-              }}>🔗 Join Online Game</button>
-              <button onClick={() => setNetScreen('qr')} style={{
-                padding:'10px 12px', borderRadius:10, border:'1px solid rgba(255,255,255,.12)',
-                background:'rgba(255,255,255,.03)', color:'#FFD700', fontSize:11, fontWeight:'bold',
-                cursor:'pointer', fontFamily:'Georgia,serif',
-              }}>
-                {roomCode ? 'Show join QR code' : 'Install / Join via QR'}
-              </button>
-              <button onClick={handleUpdateRelease} style={{
-                padding:'10px 12px', borderRadius:10, border:'1px solid rgba(75,158,255,.5)',
-                background:'rgba(75,158,255,.08)', color:'#4B9EFF', fontSize:11, fontWeight:'bold',
-                cursor:'pointer', fontFamily:'Georgia,serif',
-              }}>
-                Update latest release
-              </button>
-              {updateStatus ? (
-                <div style={{ color:'#6EAB80', fontSize:10, letterSpacing:1, textTransform:'uppercase' }}>
-                  {updateStatus}
-                </div>
-              ) : null}
-              <button onClick={() => setNetScreen('history')} style={{
-                padding:'10px 12px', borderRadius:10, border:'1px solid rgba(255,255,255,.12)',
-                background:'rgba(255,255,255,.03)', color:'#FFD700', fontSize:11, fontWeight:'bold',
-                cursor:'pointer', fontFamily:'Georgia,serif',
-              }}>
-                {history.length === 0 ? 'History is empty' : `View history (${history.length})`}
-              </button>
-
-              <p style={{color:'#6EAB80',fontSize:11,marginTop:8}}>
-                Online play needs a brief internet connection to pair the two devices, then the game runs directly between you.
-              </p>
             </div>
           )}
 
@@ -1607,7 +1574,7 @@ export default function TicATacPoker() {
       {netScreen === 'playing' && (<>
 
       {/* Navigation & Info Icons */}
-      <div style={{ position:'fixed', top:16, left:16, zIndex:100, display:'flex', gap:8 }}>
+      <div style={{ position:'fixed', top:'calc(20px + env(safe-area-inset-top, 0px))', left:16, zIndex:100, display:'flex', gap:8 }}>
         <button onClick={leaveGame} title="Back to Menu" style={{
           width:42, height:42, borderRadius:'50%',
           background:'rgba(0,0,0,.5)', border:'1px solid rgba(255,255,255,.2)',
@@ -1620,7 +1587,7 @@ export default function TicATacPoker() {
         >🏠</button>
       </div>
 
-      <div style={{ position:'fixed', top:16, right:16, zIndex:100, display:'flex', gap:8 }}>
+      <div style={{ position:'fixed', top:'calc(20px + env(safe-area-inset-top, 0px))', right:16, zIndex:100, display:'flex', gap:8 }}>
         <button onClick={startGame} title={gameOver?'New Game':'Restart'} style={{
           width:42, height:42, borderRadius:'50%',
           background:'rgba(0,0,0,.5)', border:'1px solid rgba(255,215,0,.4)',
@@ -1695,16 +1662,16 @@ export default function TicATacPoker() {
     </div>
 
       {/* Title */}
-      <h1 className="app-title" style={{margin:'0 0 4px',fontSize:'clamp(1.3rem,4vw,2.3rem)',color:'#FFD700',
+      <h1 className="app-title" style={{margin:'calc(24px + env(safe-area-inset-top, 0px)) 0 12px',fontSize:'clamp(1.3rem,4vw,2.3rem)',color:'#FFD700',
         letterSpacing:4,textShadow:'0 0 28px rgba(255,215,0,.45)',fontStyle:'italic',textAlign:'center'}}>
         ♠ TIC-A-TAC POKER ♠
       </h1>
-      <p className="app-subtitle" style={{color:'#6EAB80',margin:'0 0 6px',fontSize:10,letterSpacing:2,textAlign:'center'}}>
+      <p className="app-subtitle" style={{color:'#6EAB80',margin:'0 0 16px',fontSize:10,letterSpacing:2,textAlign:'center'}}>
         {netMode==='local'
         ? `LOCAL 1v1 · ${sanitizeProfileName(profile.displayName, 'Player 1')} VS ${getPlayerNameBySlot(1)} · SHARED 5-CARD POOL · WILD & STEAL CARDS`
         : `ONLINE 1v1 · YOU ARE ${sanitizeProfileName(profile.displayName, 'Player 1')} · ROOM ${roomCode || '—'}`}
       </p>
-      <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:10}}>
+      <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:20}}>
         {netMode !== 'local' && (
           <span style={{
             fontSize:10,color: connStatus==='connected' ? '#10B981' : '#FF6B6B',
@@ -1713,10 +1680,29 @@ export default function TicATacPoker() {
         )}
       </div>
 
+      {/* Team Scores for 2v2 */}
+      {!gameOver && netScreen === 'playing' && gameMode === '2v2' && (
+        <div style={{
+          display:'flex', gap:20, marginBottom:12, padding:'8px 16px', borderRadius:14,
+          background:'rgba(0,0,0,.35)', border:'1px solid rgba(255,215,0,.2)',
+          boxShadow:'0 4px 12px rgba(0,0,0,.2)',
+        }}>
+          <div style={{textAlign:'center'}}>
+            <div style={{color:TEAM_CLR[0], fontSize:10, fontWeight:'bold', letterSpacing:1}}>TEAM A</div>
+            <div style={{color:'#FFD700', fontSize:18, fontWeight:'bold'}}>{teamAScore} <span style={{fontSize:10, fontWeight:'normal'}}>pts</span></div>
+          </div>
+          <div style={{width:1, background:'rgba(255,255,255,.1)', margin:'4px 0'}} />
+          <div style={{textAlign:'center'}}>
+            <div style={{color:TEAM_CLR[1], fontSize:10, fontWeight:'bold', letterSpacing:1}}>TEAM B</div>
+            <div style={{color:'#FFD700', fontSize:18, fontWeight:'bold'}}>{teamBScore} <span style={{fontSize:10, fontWeight:'normal'}}>pts</span></div>
+          </div>
+        </div>
+      )}
+
       {/* Grid Switcher Tabs (Mobile or Team Switcher) */}
       {!gameOver && netScreen === 'playing' && (
         <div style={{
-          display:'flex', gap:8, marginBottom:16, width: isMobile ? 'min(360px, 94vw)' : '320px',
+          display:'flex', gap:8, marginBottom:24, width: isMobile ? 'min(360px, 94vw)' : '320px',
           background:'rgba(0,0,0,.3)', padding:4, borderRadius:12,
           border:'1px solid rgba(255,255,255,.1)',
         }}>
@@ -1755,10 +1741,14 @@ export default function TicATacPoker() {
                   background: viewedPlayer === p ? 'rgba(255,215,0,.15)' : 'transparent',
                   color: viewedPlayer === p ? '#FFD700' : '#9CA3AF',
                   fontSize:9, fontWeight:'bold', cursor:'pointer',
-                  transition:'all .2s', display:'flex', alignItems:'center', justifyContent:'center', gap:3
+                  transition:'all .2s', display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:3,
+                  borderBottom: `2px solid ${p % 2 === 0 ? TEAM_CLR[0] : TEAM_CLR[1]}40`
                 }}>
                   P{p+1}
-                  {turn === p && <span style={{width:5,height:5,borderRadius:'50%',background:P_CLR[p],boxShadow:`0 0 6px ${P_CLR[p]}`}}/>}
+                  <div style={{ display:'flex', alignItems:'center', gap:3 }}>
+                    {turn === p && <span style={{width:5,height:5,borderRadius:'50%',background:P_CLR[p],boxShadow:`0 0 6px ${P_CLR[p]}`}}/>}
+                    <span style={{ fontSize:7, opacity:0.6 }}>{p % 2 === 0 ? 'A' : 'B'}</span>
+                  </div>
                 </button>
               ))
             ) : (
@@ -1780,13 +1770,20 @@ export default function TicATacPoker() {
       )}
 
       {netScreen === 'lobby' && (
-        <div style={{display:'flex',flexDirection:'column',gap:16,width:'100%',maxWidth:380,alignItems:'center'}}>
+        <div style={{display:'flex',flexDirection:'column',gap:16,width:'100%',maxWidth: 'min(600px, 98vw)',alignItems:'center'}}>
           <div style={{background:'rgba(0,0,0,.4)', border:'2px solid rgba(255,215,0,.3)', borderRadius:16, padding:16, width:'100%'}}>
             <div style={{color:'#9CA3AF', fontSize:11, letterSpacing:2, marginBottom:12}}>GAME LOBBY · {gameMode} MODE</div>
             <div style={{display:'flex', flexDirection:'column', gap:8}}>
               {players.map(p => (
                 <div key={p.id} style={{display:'flex', justifyContent:'space-between', alignItems:'center', background:'rgba(255,255,255,.05)', padding:'8px 12px', borderRadius:10}}>
-                  <span style={{color:P_CLR[p.idx], fontWeight:'bold', fontSize:14}}>{p.name} {p.idx === myPlayerIdx && '(YOU)'}</span>
+                  <div style={{ display:'flex', flexDirection:'column' }}>
+                    <span style={{color:P_CLR[p.idx], fontWeight:'bold', fontSize:14}}>{p.name} {p.idx === myPlayerIdx && '(YOU)'}</span>
+                    {gameMode === '2v2' && (
+                      <span style={{ fontSize:9, color: p.idx % 2 === 0 ? TEAM_CLR[0] : TEAM_CLR[1], letterSpacing:1 }}>
+                        {p.idx % 2 === 0 ? 'TEAM A (Blue)' : 'TEAM B (Red)'}
+                      </span>
+                    )}
+                  </div>
                   <span style={{fontSize:10, color:'#6EAB80'}}>● Ready</span>
                 </div>
               ))}
@@ -1845,6 +1842,8 @@ export default function TicATacPoker() {
                   stealMode={isSteal && (gameMode==='2v2' ? (i%2 !== turn%2) : (i !== turn)) && canIAct}
                   onPlace={idx=>placeCard(idx)}
                   onSteal={idx=>stealCard(idx, i)}
+                  playerIdx={i}
+                  gameMode={gameMode}
                 />
               </div>
 
@@ -1880,7 +1879,7 @@ export default function TicATacPoker() {
 
         {/* Center Pool for Mobile (Vertical stacking) */}
         {isMobile && (
-          <div style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:8, width:'min(420px,94vw)' }}>
+          <div style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:12, width:'min(420px,94vw)', marginTop:12 }}>
             <div style={{
               background:'rgba(0,0,0,.4)', border:'1px solid rgba(255,215,0,.22)',
               borderRadius:14, padding:'10px 8px', textAlign:'center', width:'100%',
@@ -1910,7 +1909,7 @@ export default function TicATacPoker() {
       <div style={{
         background:'rgba(0,0,0,.45)',
         border:`1px solid ${isSteal?'rgba(255,107,53,.5)':isWild?'rgba(255,215,0,.5)':'rgba(255,215,0,.25)'}`,
-        borderRadius:12, padding:'9px 22px', marginTop:16, marginBottom:16, textAlign:'center',
+        borderRadius:12, padding:'9px 22px', marginTop:24, marginBottom:24, textAlign:'center',
         animation: gameOver ? 'none' : isSteal ? 'stGlow 1.5s infinite' : isWild ? 'glow 2s infinite' : 'glow 2s infinite',
         minWidth:'min(300px, 100%)', maxWidth:'94vw',
       }}>
