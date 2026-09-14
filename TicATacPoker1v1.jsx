@@ -530,6 +530,24 @@ export default function TicATacPoker() {
   const playersRef = useRef([]);
   const liveRef = useRef({}); // toujours à jour après chaque rendu ; lu par les callbacks PeerJS pour éviter les closures périmées
   const [myPlayerIdx, setMyPlayerIdx] = useState(0); // assigned by host
+  const gameSessionRef = useRef(0);
+  const pendingTimersRef = useRef([]);
+
+  const clearPendingTimers = useCallback(() => {
+    pendingTimersRef.current.forEach(timerId => clearTimeout(timerId));
+    pendingTimersRef.current = [];
+  }, []);
+
+  const scheduleTimeout = useCallback((callback, delay = TURN_DELAY_MS) => {
+    const sessionId = gameSessionRef.current;
+    const timeoutId = setTimeout(() => {
+      pendingTimersRef.current = pendingTimersRef.current.filter(id => id !== timeoutId);
+      if (gameSessionRef.current !== sessionId) return;
+      callback();
+    }, delay);
+    pendingTimersRef.current.push(timeoutId);
+    return timeoutId;
+  }, []);
 
   const [deck,     setDeck]     = useState([]);
   const [pool,     setPool]     = useState([null, null, null, null, null]); // always 5
@@ -745,6 +763,7 @@ export default function TicATacPoker() {
   };
 
   const startHosting = (fixedCode, retryCount = 0) => {
+    clearPendingTimers();
     teardownNetworking();
     const session = peerSessionRef.current;
     const code = (typeof fixedCode === 'string' && fixedCode.trim()) ? fixedCode.trim().toUpperCase() : makeRoomCode();
@@ -801,6 +820,7 @@ export default function TicATacPoker() {
 
   const handleQuickJoin = () => {
     const quickCode = 'QUICK';
+    clearPendingTimers();
     teardownNetworking();
     const session = peerSessionRef.current;
     setNetMode('guest');
@@ -845,6 +865,7 @@ export default function TicATacPoker() {
       ? fixedCode.trim().toUpperCase()
       : joinInput.trim().toUpperCase();
     if (!code) return;
+    clearPendingTimers();
     teardownNetworking();
     const session = peerSessionRef.current;
     setNetMode('guest');
@@ -954,14 +975,18 @@ export default function TicATacPoker() {
   };
 
   const leaveGame = () => {
+    gameSessionRef.current += 1;
+    clearPendingTimers();
     teardownNetworking();
     setNetScreen('menu'); setNetMode('local'); setConnStatus('idle'); setConnErr('');
     setRoomCode(''); setJoinInput(''); setPlayers([]); setMyPlayerIdx(0);
   };
 
   useEffect(() => () => { // cleanup on unmount
+    gameSessionRef.current += 1;
+    clearPendingTimers();
     teardownNetworking();
-  }, []);
+  }, [clearPendingTimers]);
 
   useEffect(() => {
     playersRef.current = players;
@@ -1109,6 +1134,9 @@ export default function TicATacPoker() {
 
   const startGame = useCallback(() => {
     if (netMode === 'guest') { sendAction('startGame'); return; }
+    gameSessionRef.current += 1;
+    clearPendingTimers();
+    if (netMode === 'local') teardownNetworking();
     const d = buildDeck();
     const p = [null, null, null, null, null];
     const rem = [...d];
@@ -1125,7 +1153,7 @@ export default function TicATacPoker() {
       deck:rem, pool:p, grids:newGrids, turn:0, phase:'picking', held:null,
       stealTarget:null, gameOver:false, finalSc:Array(numPlayers).fill(0), log:[], gameMode
     });
-  }, [addLog, netMode, broadcastState, gameMode]);
+  }, [addLog, netMode, broadcastState, gameMode, clearPendingTimers]);
 
   // ── Pick a card from the pool ──
   const getStealTargets = useCallback((playerTurn = turn) => {
@@ -1163,7 +1191,7 @@ export default function TicATacPoker() {
         setPhase('waiting');
         addLog(`⚡ ${getPlayerNameBySlot(turn)} drew STEAL but there was nothing to steal — turn passes.`, '#FF6B35');
         if (netMode === 'host') broadcastState({ held:null, phase:'waiting' });
-        setTimeout(() => {
+        scheduleTimeout(() => {
           advanceTurn(pool, deck, grids);
         }, TURN_DELAY_MS);
         return;
@@ -1252,7 +1280,7 @@ export default function TicATacPoker() {
     setPhase('waiting');
     if (netMode === 'host') broadcastState({ grids: newGrids, pool: newPool, deck: newDeck, phase: 'waiting' });
 
-    setTimeout(() => {
+    scheduleTimeout(() => {
       advanceTurn(newPool, newDeck, newGrids);
     }, TURN_DELAY_MS);
   };
@@ -1278,7 +1306,7 @@ export default function TicATacPoker() {
     setPhase('waiting');
     if (netMode === 'host') broadcastState({ grids: newGrids, pool: newPool, deck: newDeck, phase: 'waiting' });
 
-    setTimeout(() => {
+    scheduleTimeout(() => {
       setHeld(newHeld);
       setPhase('placing');
       setStealTarget(null);
@@ -1413,7 +1441,7 @@ export default function TicATacPoker() {
       setHeld(null);
       setPhase('waiting');
       if (netMode === 'host') broadcastState({ held:null, phase:'waiting' });
-      setTimeout(() => {
+      scheduleTimeout(() => {
         advanceTurn(pool, deck, grids);
       }, TURN_DELAY_MS);
       return;
@@ -1464,7 +1492,7 @@ export default function TicATacPoker() {
   }, [aiControllerActive, aiDifficulty, gameOver, grids, held, isAiSlot, isHumanSlot, netMode, turn]);
 
   useEffect(() => {
-    if (!aiControllerActive || netMode === 'guest' || gameOver || isHumanSlot(turn) || phase === 'waiting') return;
+    if (netScreen !== 'playing' || !aiControllerActive || netMode === 'guest' || gameOver || isHumanSlot(turn) || phase === 'waiting') return;
     const timer = setTimeout(() => {
       if (phase === 'picking') {
         if (!pool.length) return;
@@ -1550,7 +1578,7 @@ export default function TicATacPoker() {
     }, 700);
 
     return () => clearTimeout(timer);
-  }, [aiControllerActive, aiDifficulty, chooseAiPlacement, chooseAiSteal, chooseAiWildChoice, gameOver, grids, isHumanSlot, netMode, phase, pickCard, placeCard, pool, selectWildSuit, selectWildValue, turn, wildSelection]);
+  }, [aiControllerActive, aiDifficulty, chooseAiPlacement, chooseAiSteal, chooseAiWildChoice, gameOver, grids, isHumanSlot, netMode, netScreen, phase, pickCard, placeCard, pool, selectWildSuit, selectWildValue, turn, wildSelection]);
 
   // ── Hôte : exécute une action reçue de l'invité, comme si elle venait d'un clic local ──
   function handleRemoteAction(msg) {
