@@ -10,7 +10,7 @@ const VNUM   = {'2':2,'3':3,'4':4,'5':5,'6':6,'7':7,'8':8,'9':9,'10':10,'J':11,'
 const RED    = new Set(['♥','♦']);
 const P_CLR  = ['#4B9EFF','#FF5F5F','#A855F7','#FFAD60']; // P1 (Blue), P2 (Red), P3 (Purple), P4 (Orange)
 const TEAM_CLR = ['#4B9EFF', '#FF5F5F'];
-const ROOM_PREFIX = 'tatp-'; // namespace so we don't collide with other apps on the public PeerJS broker
+const ROOM_PREFIX = 'tictacpoker'; // namespace so we don't collide with other apps on the public PeerJS broker
 const APP_WEB_URL = (import.meta.env.VITE_WEB_APP_URL || 'https://beauchesnedave56-png.github.io/TicTacPoker/').replace(/\/+$/, '') + '/';
 const DEFAULT_APK_DOWNLOAD_URL = 'https://github.com/beauchesnedave56-png/TicTacPoker/releases/latest/download/TicTacPoker.apk';
 const APP_DOWNLOAD_URL = import.meta.env.VITE_APK_DOWNLOAD_URL || DEFAULT_APK_DOWNLOAD_URL;
@@ -655,14 +655,20 @@ export default function TicATacPoker() {
     setNetMode('host');
     setNetScreen('hosting');
     setConnStatus('connecting');
+    setRoomCode('');
     const hostPlayer = { id: profile.id, idx: 0, name: sanitizeProfileName(profile.displayName, 'Player 1') };
     playersRef.current = [hostPlayer];
     setPlayers([hostPlayer]);
     setMyPlayerIdx(0);
     const code = fixedCode || makeRoomCode();
-    const p = new Peer(ROOM_PREFIX + code);
+    // Ensure clean alphanumeric ID for the broker
+    const fullId = (ROOM_PREFIX + code).toLowerCase().replace(/[^a-z0-9]/g, '');
+    const p = new Peer(fullId);
     peerRef.current = p;
-    p.on('open', () => { setRoomCode(code); setConnStatus('waiting'); });
+    p.on('open', () => {
+      setRoomCode(code);
+      setConnStatus('waiting');
+    });
     p.on('connection', c => wireConnection(c));
     p.on('error', err => {
       if (err.type === 'unavailable-id' && !fixedCode) { p.destroy(); startHosting(); return; }
@@ -682,7 +688,8 @@ export default function TicATacPoker() {
     const p = new Peer();
     peerRef.current = p;
     p.on('open', () => {
-      const c = p.connect(ROOM_PREFIX + quickCode, { reliable:true });
+      const fullId = (ROOM_PREFIX + quickCode).toLowerCase().replace(/[^a-z0-9]/g, '');
+      const c = p.connect(fullId, { reliable:true });
       wireConnection(c);
     });
     p.on('error', err => {
@@ -705,7 +712,8 @@ export default function TicATacPoker() {
     const p = new Peer();
     peerRef.current = p;
     p.on('open', () => {
-      const c = p.connect(ROOM_PREFIX + code, { reliable:true });
+      const fullId = (ROOM_PREFIX + code).toLowerCase().replace(/[^a-z0-9]/g, '');
+      const c = p.connect(fullId, { reliable:true });
       c.on('error', () => { setConnStatus('error'); setConnErr("Couldn't reach that game code. Check it and try again."); });
       wireConnection(c);
     });
@@ -1107,9 +1115,29 @@ export default function TicATacPoker() {
       trial[cellIdx] = held.card;
       const current = totalScore(currentGrid);
       const projected = totalScore(trial);
-      const lineScore = getLines(trial).filter(l => (l.cards.every(Boolean) || l.guaranteed) && l.score > 0).reduce((sum, line) => sum + line.score, 0);
-      const drawBonus = getLines(currentGrid).filter(l => l.cells.includes(cellIdx)).reduce((sum, line) => sum + (line.preview ? 2 : 0) + (line.guaranteed ? 5 : 0), 0);
-      let score = (projected - current) * 4 + lineScore * 0.8 + drawBonus;
+
+      const linesWithCell = getLines(trial).filter(l => l.cells.includes(cellIdx));
+      const lineScore = linesWithCell.filter(l => (l.cards.every(Boolean) || l.guaranteed) && l.score > 0).reduce((sum, line) => sum + line.score, 0);
+
+      // Bonus for draws (only if not already a guaranteed score)
+      const drawBonus = linesWithCell.reduce((sum, line) => {
+        if (line.score > 0) return sum;
+        if (line.preview?.name === 'Flush Draw') return sum + 8;
+        if (line.preview?.name === 'Straight Draw') return sum + 6;
+        return sum;
+      }, 0);
+
+      let score = (projected - current) * 10 + lineScore * 2 + drawBonus;
+
+      if (aiDifficulty === 'hard') {
+        // High value card bonus
+        const val = VNUM[held.card.value] || 0;
+        if (val >= 12) score += (val - 10) * 2;
+
+        // Blocking opponent potential? (Advanced: look at other players)
+        // For simplicity, just focus on maximizing own board very aggressively
+      }
+
       if (held.card.value === 'A' || held.card.value === 'K' || held.card.value === 'Q') score += 2;
       if (held.card.steal) score += 4;
       if (held.card.wild) score += 3;
@@ -1135,13 +1163,29 @@ export default function TicATacPoker() {
 
     const options = [];
     targets.forEach(targetIdx => {
+      const targetLines = getLines(grids[targetIdx]);
       grids[targetIdx].forEach((card, cellIdx) => {
         if (!card) return;
         let score = VNUM[card.value] || 0;
-        if (card.wild) score += 10;
-        const relevantLines = getLines(grids[targetIdx]).filter(line => line.cells.includes(cellIdx));
-        score += relevantLines.reduce((sum, line) => sum + (line.score || 0), 0) * 0.5;
-        if (aiDifficulty === 'hard') score += (card.value === 'A' || card.value === 'K' ? 6 : 0);
+        if (card.wild) score += 15;
+
+        const relevantLines = targetLines.filter(line => line.cells.includes(cellIdx));
+        const lineImpact = relevantLines.reduce((sum, line) => {
+          if (line.score > 0) return sum + line.score;
+          if (line.guaranteed) return sum + 15;
+          if (line.preview) return sum + 5;
+          return sum;
+        }, 0);
+
+        score += lineImpact;
+
+        if (aiDifficulty === 'hard') {
+          // Extra weight for breaking high-rank hands
+          const highestRank = Math.max(...relevantLines.map(l => l.rank || 0));
+          if (highestRank >= 6) score += 50; // Trips or better
+          else if (highestRank >= 4) score += 30; // Flush/Straight
+        }
+
         options.push({ targetIdx, cellIdx, score });
       });
     });
@@ -1160,19 +1204,24 @@ export default function TicATacPoker() {
   const chooseAiWildChoice = useCallback(() => {
     if (!held || !grids[turn] || gameOver || !aiMode || netMode !== 'local' || isHumanSlot(turn)) return null;
     const options = [];
+    const currentGrid = grids[turn];
+    const emptyCells = currentGrid.map((c, i) => c ? null : i).filter(i => i !== null);
+
     SUITS.forEach(suit => {
       VALUES.forEach(value => {
-        let score = 0;
-        grids[turn].forEach((card, cellIdx) => {
-          if (card) return;
-          const trial = [...grids[turn]];
+        let bestPlacementScore = -1;
+        emptyCells.forEach(cellIdx => {
+          const trial = [...currentGrid];
           trial[cellIdx] = { ...held.card, suit, value, wild: false, fromWild: true, label: undefined };
-          score += totalScore(trial) - totalScore(grids[turn]);
+          const s = totalScore(trial);
+          if (s > bestPlacementScore) bestPlacementScore = s;
         });
-        const suitMatches = grids[turn].filter(card => card && card.suit === suit).length * 4;
-        const valueMatches = grids[turn].filter(card => card && card.value === value).length * 3;
-        score += suitMatches + valueMatches;
-        options.push({ suit, value, score });
+
+        // Heuristic fallback if no instant score
+        const suitMatches = currentGrid.filter(card => card && card.suit === suit).length * 4;
+        const valueMatches = currentGrid.filter(card => card && card.value === value).length * 3;
+
+        options.push({ suit, value, score: bestPlacementScore * 10 + suitMatches + valueMatches });
       });
     });
     options.sort((a, b) => b.score - a.score);
@@ -1194,20 +1243,46 @@ export default function TicATacPoker() {
         const ranked = pool
           .map((card, poolIdx) => {
             if (!card) return null;
-            let score = 0;
-            if (card.steal) score += 18;
-            if (card.wild) score += 17;
-            score += (card.value === 'A' || card.value === 'K' ? 6 : 0);
+            let myScore = 0;
+            if (card.steal) myScore += 25;
+            if (card.wild) myScore += 22;
+
             const localGrid = grids[turn];
             localGrid.forEach((gridCard, cellIdx) => {
               if (gridCard) return;
               const trial = [...localGrid];
               trial[cellIdx] = card;
-              score += (totalScore(trial) - totalScore(localGrid)) * 3;
+              myScore += (totalScore(trial) - totalScore(localGrid)) * 5;
+
+              // Draw potential bonus
+              const linesWithCell = getLines(trial).filter(l => l.cells.includes(cellIdx));
+              linesWithCell.forEach(l => {
+                if (l.preview?.name === 'Flush Draw') myScore += 5;
+                if (l.preview?.name === 'Straight Draw') myScore += 4;
+              });
             });
-            if (aiDifficulty === 'medium') score = score * (0.7 + Math.random() * 0.6);
-            if (aiDifficulty === 'easy') score = score * (0.45 + Math.random() * 0.8);
-            return { poolIdx, score };
+
+            let defenseScore = 0;
+            if (aiDifficulty === 'hard') {
+              // Who is my main threat?
+              const opponents = grids.map((g, i) => i).filter(i => i !== turn);
+              opponents.forEach(oppIdx => {
+                const oppGrid = grids[oppIdx];
+                oppGrid.forEach((gridCard, cellIdx) => {
+                  if (gridCard) return;
+                  const trial = [...oppGrid];
+                  trial[cellIdx] = card;
+                  const impact = (totalScore(trial) - totalScore(oppGrid));
+                  if (impact > 0) defenseScore += impact * 4;
+                });
+              });
+            }
+
+            let finalScore = myScore + defenseScore;
+            if (aiDifficulty === 'medium') finalScore = finalScore * (0.7 + Math.random() * 0.6);
+            if (aiDifficulty === 'easy') finalScore = finalScore * (0.45 + Math.random() * 0.8);
+
+            return { poolIdx, score: finalScore };
           })
           .filter(Boolean)
           .sort((a, b) => b.score - a.score);
@@ -1354,7 +1429,7 @@ export default function TicATacPoker() {
                 </div>
 
                 {/* Game Mode Switcher */}
-                <div style={{ display: 'flex', gap: '4px', background: 'rgba(0,0,0,.3)', padding: '4px', borderRadius: '12px', border: '0.5px solid rgba(255,255,255,.1)', marginBottom: '16px' }}>
+                <div style={{ display: 'flex', gap: '4px', background: 'rgba(0,0,0,.3)', padding: '4px', borderRadius: '12px', border: '0.5px solid rgba(255,255,255,.1)', marginBottom: '12px' }}>
                   {['1v1', '1v1v1', '2v2'].map(m => (
                     <div key={m} onClick={() => setGameMode(m)} style={{
                       flex: 1, textAlign: 'center', padding: '7px 0', borderRadius: '8px',
@@ -1362,6 +1437,19 @@ export default function TicATacPoker() {
                       color: gameMode === m ? '#FFD700' : '#9CA3AF',
                       fontSize: '11px', fontWeight: '500', cursor: 'pointer', transition: 'all .2s'
                     }}>{m}</div>
+                  ))}
+                </div>
+
+                {/* AI Difficulty Switcher (only if vs AI is likely) */}
+                <div style={{ display: 'flex', gap: '4px', background: 'rgba(0,0,0,.2)', padding: '3px', borderRadius: '10px', border: '0.5px solid rgba(255,255,255,0.05)', marginBottom: '16px' }}>
+                  {['easy', 'medium', 'hard'].map(d => (
+                    <div key={d} onClick={() => setAiDifficulty(d)} style={{
+                      flex: 1, textAlign: 'center', padding: '5px 0', borderRadius: '7px',
+                      background: aiDifficulty === d ? 'rgba(168,85,247,0.2)' : 'transparent',
+                      color: aiDifficulty === d ? '#C084FC' : '#6B7280',
+                      fontSize: '9px', fontWeight: '600', cursor: 'pointer', transition: 'all 0.2s',
+                      textTransform: 'uppercase', letterSpacing: '1px'
+                    }}>{d}</div>
                   ))}
                 </div>
 
