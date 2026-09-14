@@ -514,6 +514,7 @@ export default function TicATacPoker() {
   const [aiDifficulty, setAiDifficulty] = useState('medium'); // easy | medium | hard
   const [profile,   setProfile]   = useState(() => loadStoredProfile());
   const [draftName, setDraftName]  = useState(() => loadStoredProfile().displayName);
+  const [showProfileEditor, setShowProfileEditor] = useState(false);
   const [history,   setHistory]   = useState(() => loadStoredHistory());
   const [roomCode,  setRoomCode]  = useState('');
   const [joinInput, setJoinInput] = useState('');
@@ -1100,6 +1101,7 @@ export default function TicATacPoker() {
     const nextName = sanitizeProfileName(draftName, '');
     const nextProfile = { ...profile, displayName: nextName, updatedAt: new Date().toISOString() };
     setProfile(nextProfile);
+    setShowProfileEditor(false);
     void writeJsonStorage(PROFILE_STORAGE_KEY, nextProfile);
 
     if (netMode === 'guest' && connsRef.current[0]?.open) {
@@ -1661,6 +1663,26 @@ export default function TicATacPoker() {
         }
       `}</style>
 
+      {showProfileEditor && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(3,7,18,.72)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, zIndex: 1000 }} onClick={() => setShowProfileEditor(false)}>
+          <div onClick={(e) => e.stopPropagation()} style={{ width: '100%', maxWidth: 360, background: 'rgba(15,23,42,.96)', border: '1px solid rgba(255,255,255,.1)', borderRadius: 18, padding: 18, boxShadow: '0 20px 50px rgba(0,0,0,.45)' }}>
+            <div style={{ color: '#FFD700', fontSize: 18, fontWeight: 'bold', marginBottom: 12 }}>Edit profile</div>
+            <label style={{ display: 'block', color: '#D1D5DB', fontSize: 12, marginBottom: 8 }}>Display name</label>
+            <input
+              value={draftName}
+              onChange={(e) => setDraftName(e.target.value)}
+              maxLength={20}
+              placeholder="Player 1"
+              style={{ width: '100%', borderRadius: 10, border: '1px solid rgba(255,255,255,.14)', background: 'rgba(255,255,255,.04)', color: '#F3F4F6', padding: '10px 12px', fontSize: 14, outline: 'none', marginBottom: 14 }}
+            />
+            <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+              <button onClick={() => setShowProfileEditor(false)} style={{ background: 'transparent', color: '#9CA3AF', border: '1px solid rgba(255,255,255,.1)', borderRadius: 10, padding: '8px 12px', cursor: 'pointer' }}>Cancel</button>
+              <button onClick={saveProfile} style={{ background: 'linear-gradient(135deg,#FFD700,#FF8C00)', color: '#1A1A2E', border: 'none', borderRadius: 10, padding: '8px 12px', fontWeight: 'bold', cursor: 'pointer' }}>Save</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {netScreen !== 'playing' && (
         <div style={{
           minHeight:'80vh', display:'flex', flexDirection:'column', alignItems:'center',
@@ -1677,7 +1699,7 @@ export default function TicATacPoker() {
                 </div>
 
                 {/* Profile Card */}
-                <div onClick={() => {}} style={{ display: 'flex', alignItems: 'center', gap: '10px', background: 'rgba(0,0,0,.28)', border: '0.5px solid rgba(255,255,255,.1)', borderRadius: '14px', padding: '8px 12px', marginBottom: '14px', cursor: 'pointer' }}>
+                <div onClick={() => { setDraftName(profile.displayName); setShowProfileEditor(true); }} style={{ display: 'flex', alignItems: 'center', gap: '10px', background: 'rgba(0,0,0,.28)', border: '0.5px solid rgba(255,255,255,.1)', borderRadius: '14px', padding: '8px 12px', marginBottom: '14px', cursor: 'pointer' }}>
                   <div style={{ width: '32px', height: '32px', borderRadius: '50%', background: 'rgba(255,215,0,.15)', border: '1px solid rgba(255,215,0,.4)', display: 'flex', justifyContent: 'center', alignItems: 'center', fontSize: '13px', fontWeight: '500', color: '#FFD700', flexShrink: 0 }}>
                     {profile.displayName.charAt(0).toUpperCase() || 'P'}
                   </div>
